@@ -8,6 +8,7 @@ Optional secret: LORRAINE_API_KEY in the same secret.
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import json
 import os
@@ -22,6 +23,7 @@ import modal
 APP_NAME = "lorraine-transcription"
 DATA_ROOT = Path("/data/jobs")
 CACHE_ROOT = "/cache"
+LONG_REQUEST_TIMEOUT_SECONDS = 60 * 60 * 2
 
 app = modal.App(APP_NAME)
 data_volume = modal.Volume.from_name("lorraine-data", create_if_missing=True)
@@ -123,7 +125,7 @@ def _speaker_sample(
 @app.function(
     image=gpu_image,
     gpu="A10G",
-    timeout=60 * 30,
+    timeout=LONG_REQUEST_TIMEOUT_SECONDS,
     volumes={"/data": data_volume, CACHE_ROOT: model_cache},
     secrets=secrets,
 )
@@ -139,11 +141,19 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
         data_volume.reload()
         directory = DATA_ROOT / job_id
         audio_path = next(directory.glob("input.*"))
-        _write_status(job_id, {"status": "processing", "stage": "transcribing"})
+        _write_status(
+            job_id,
+            {"status": "processing", "stage": "starting", "progress": 0.12},
+        )
         data_volume.commit()
 
         device = "cuda"
         audio = whisperx.load_audio(str(audio_path))
+        _write_status(
+            job_id,
+            {"status": "processing", "stage": "transcribing", "progress": 0.2},
+        )
+        data_volume.commit()
         model = whisperx.load_model(
             "large-v3",
             device,
@@ -155,7 +165,10 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
         gc.collect()
         torch.cuda.empty_cache()
 
-        _write_status(job_id, {"status": "processing", "stage": "aligning"})
+        _write_status(
+            job_id,
+            {"status": "processing", "stage": "aligning", "progress": 0.62},
+        )
         data_volume.commit()
         align_model, metadata = whisperx.load_align_model(
             language_code=result["language"], device=device
@@ -172,7 +185,10 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
         gc.collect()
         torch.cuda.empty_cache()
 
-        _write_status(job_id, {"status": "processing", "stage": "diarizing"})
+        _write_status(
+            job_id,
+            {"status": "processing", "stage": "diarizing", "progress": 0.76},
+        )
         data_volume.commit()
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
@@ -187,6 +203,11 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
             diarization, result, speaker_embeddings=embeddings, fill_nearest=True
         )
 
+        _write_status(
+            job_id,
+            {"status": "processing", "stage": "voices", "progress": 0.88},
+        )
+        data_volume.commit()
         segments = [
             {
                 "start": float(segment.get("start", 0)),
@@ -217,8 +238,15 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
 
         _write_status(
             job_id,
+            {"status": "processing", "stage": "finalizing", "progress": 0.96},
+        )
+        data_volume.commit()
+        _write_status(
+            job_id,
             {
                 "status": "complete",
+                "stage": "complete",
+                "progress": 1.0,
                 "language": result.get("language", "unknown"),
                 "segments": segments,
                 "speakers": speaker_results,
@@ -228,23 +256,28 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
         data_volume.commit()
         model_cache.commit()
     except Exception as error:
-        _write_status(job_id, {"status": "failed", "error": str(error)})
+        _write_status(
+            job_id,
+            {"status": "failed", "stage": "failed", "error": str(error)},
+        )
         data_volume.commit()
         raise
 
 
 @app.function(
     image=web_image,
-    timeout=60 * 10,
+    # Large meeting uploads can keep this request open for several minutes.
+    timeout=LONG_REQUEST_TIMEOUT_SECONDS,
     volumes={"/data": data_volume},
     secrets=secrets,
 )
 @modal.asgi_app()
 def api():
-    from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+    from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 
     # With postponed annotations, FastAPI resolves UploadFile from module globals.
     globals()["UploadFile"] = UploadFile
+    globals()["Request"] = Request
 
     web = FastAPI(title="Lorraine transcription API", version="1.0")
 
@@ -259,6 +292,147 @@ def api():
     @web.get("/health")
     async def health():
         return {"status": "ok"}
+
+    def job_directory(job_id: str) -> Path:
+        try:
+            uuid.UUID(job_id)
+        except ValueError as error:
+            raise HTTPException(status_code=404, detail="Job not found") from error
+        return DATA_ROOT / job_id
+
+    @web.post("/uploads", status_code=201)
+    async def create_upload(
+        meeting_id: str = Form(...),
+        filename: str = Form(...),
+        known_profiles: str = Form("[]"),
+        match_threshold: float = Form(0.72),
+        total_bytes: int = Form(...),
+        chunk_count: int = Form(...),
+        audio_sha256: str = Form(...),
+        authorization: str | None = Header(None),
+    ):
+        authorize(authorization)
+        del meeting_id
+        profiles = json.loads(known_profiles)
+        if not isinstance(profiles, list):
+            raise HTTPException(status_code=400, detail="known_profiles must be a JSON list")
+        if total_bytes <= 0 or chunk_count <= 0 or chunk_count > 10_000:
+            raise HTTPException(status_code=400, detail="Invalid upload size")
+        if len(audio_sha256) != 64:
+            raise HTTPException(status_code=400, detail="Invalid audio checksum")
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".m4a", ".mp3", ".wav", ".mp4", ".webm", ".ogg"}:
+            suffix = ".m4a"
+        job_id = str(uuid.uuid4())
+        directory = DATA_ROOT / job_id
+        directory.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "suffix": suffix,
+            "profiles": profiles,
+            "match_threshold": max(0.0, min(1.0, match_threshold)),
+            "total_bytes": total_bytes,
+            "chunk_count": chunk_count,
+            "audio_sha256": audio_sha256,
+        }
+        (directory / "upload.json").write_text(json.dumps(metadata), encoding="utf-8")
+        _write_status(
+            job_id,
+            {"status": "uploading", "stage": "receiving", "progress": 0.02},
+        )
+        data_volume.commit()
+        return {"job_id": job_id, "status": "uploading"}
+
+    @web.put("/uploads/{job_id}/chunks/{index}")
+    async def put_upload_chunk(
+        job_id: str,
+        index: int,
+        request: Request,
+        x_chunk_sha256: str = Header(...),
+        authorization: str | None = Header(None),
+    ):
+        authorize(authorization)
+        directory = job_directory(job_id)
+        data_volume.reload()
+        metadata_path = directory / "upload.json"
+        if not metadata_path.exists():
+            raise HTTPException(status_code=404, detail="Upload not found")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        chunk_count = int(metadata["chunk_count"])
+        if index < 0 or index >= chunk_count:
+            raise HTTPException(status_code=400, detail="Invalid chunk index")
+        content = await request.body()
+        if not content or len(content) > 8 * 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Chunk must be at most 8 MB")
+        actual_hash = hashlib.sha256(content).hexdigest()
+        if not hmac.compare_digest(actual_hash, x_chunk_sha256):
+            raise HTTPException(status_code=409, detail="Chunk checksum mismatch")
+        destination = directory / f"chunk-{index:05d}.part"
+        temporary = directory / f"chunk-{index:05d}.tmp"
+        temporary.write_bytes(content)
+        temporary.replace(destination)
+        received = len(list(directory.glob("chunk-*.part")))
+        _write_status(
+            job_id,
+            {
+                "status": "uploading",
+                "stage": "receiving",
+                "progress": 0.02 + (0.08 * received / chunk_count),
+            },
+        )
+        data_volume.commit()
+        return {"received": index, "chunks_received": received}
+
+    @web.post("/uploads/{job_id}/complete", status_code=202)
+    async def complete_upload(
+        job_id: str,
+        authorization: str | None = Header(None),
+    ):
+        authorize(authorization)
+        directory = job_directory(job_id)
+        data_volume.reload()
+        metadata_path = directory / "upload.json"
+        if not metadata_path.exists():
+            status_path = directory / "status.json"
+            if status_path.exists():
+                return {"job_id": job_id, "status": "processing"}
+            raise HTTPException(status_code=404, detail="Upload not found")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        chunks = [
+            directory / f"chunk-{index:05d}.part"
+            for index in range(int(metadata["chunk_count"]))
+        ]
+        if any(not chunk.exists() for chunk in chunks):
+            raise HTTPException(status_code=409, detail="Upload is missing chunks")
+        destination = directory / f"input{metadata['suffix']}"
+        digest = hashlib.sha256()
+        written = 0
+        with destination.open("wb") as output:
+            for chunk in chunks:
+                with chunk.open("rb") as source:
+                    while block := source.read(1024 * 1024):
+                        digest.update(block)
+                        written += len(block)
+                        output.write(block)
+        if written != int(metadata["total_bytes"]) or not hmac.compare_digest(
+            digest.hexdigest(), str(metadata["audio_sha256"])
+        ):
+            destination.unlink(missing_ok=True)
+            raise HTTPException(status_code=409, detail="Completed upload checksum mismatch")
+        _write_status(
+            job_id,
+            {"status": "processing", "stage": "queued", "progress": 0.1},
+        )
+        data_volume.commit()
+        transcribe.spawn(
+            job_id,
+            metadata["profiles"],
+            float(metadata["match_threshold"]),
+        )
+        for chunk in chunks:
+            chunk.unlink(missing_ok=True)
+        metadata_path.unlink(missing_ok=True)
+        data_volume.commit()
+        return {"job_id": job_id, "status": "processing"}
 
     @web.post("/jobs", status_code=202)
     async def create_job(
@@ -283,7 +457,10 @@ def api():
         with destination.open("wb") as output:
             while chunk := await audio.read(1024 * 1024):
                 output.write(chunk)
-        _write_status(job_id, {"status": "processing", "stage": "queued"})
+        _write_status(
+            job_id,
+            {"status": "processing", "stage": "queued", "progress": 0.1},
+        )
         data_volume.commit()
         transcribe.spawn(job_id, profiles, max(0.0, min(1.0, match_threshold)))
         return {"job_id": job_id, "status": "processing"}

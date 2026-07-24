@@ -9,6 +9,7 @@ It also keeps a normalized voice embedding and a short WAV sample for every anon
 - macOS 15+ system audio and microphone capture via ScreenCaptureKit
 - durable local M4A recordings and JSON-backed meeting history
 - asynchronous Modal upload, processing, polling, retry, and failure states
+- transcription-optimized audio with checksummed, retriable chunk uploads
 - automatic idempotent Modal deployment on app startup through the authenticated CLI
 - WhisperX large-v3 transcription, alignment, and pyannote diarization on an A10G GPU
 - anonymous speaker labels, short voice samples, and normalized speaker embeddings

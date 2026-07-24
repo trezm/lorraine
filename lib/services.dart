@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 
@@ -21,6 +22,80 @@ class AudioCaptureService {
 
   Future<String> stop() async =>
       (await _channel.invokeMethod<String>('stop')) ?? '';
+}
+
+class PreparedAudio {
+  const PreparedAudio({required this.file, required this.isTemporary});
+
+  final File file;
+  final bool isTemporary;
+
+  Future<void> dispose() async {
+    if (isTemporary && await file.exists()) await file.delete();
+  }
+}
+
+class UploadPreparationService {
+  Future<PreparedAudio> prepare(Meeting meeting, Directory appRoot) async {
+    if (!Platform.isMacOS) {
+      return PreparedAudio(file: File(meeting.audioPath), isTemporary: false);
+    }
+    final directory = Directory('${appRoot.path}/upload_temp');
+    await directory.create(recursive: true);
+    final pcm = File('${directory.path}/${meeting.id}-upload.caf');
+    final output = File('${directory.path}/${meeting.id}-upload.m4a');
+    if (await pcm.exists()) await pcm.delete();
+    if (await output.exists()) await output.delete();
+    try {
+      final downmix = await Process.run('/usr/bin/afconvert', [
+        meeting.audioPath,
+        '-o',
+        pcm.path,
+        '-f',
+        'caff',
+        '-d',
+        'LEI16@16000',
+        '-c',
+        '1',
+        '--mix',
+      ]);
+      if (downmix.exitCode != 0) {
+        throw ProcessException(
+          '/usr/bin/afconvert',
+          const [],
+          downmix.stderr.toString(),
+          downmix.exitCode,
+        );
+      }
+      final encode = await Process.run('/usr/bin/afconvert', [
+        pcm.path,
+        '-o',
+        output.path,
+        '-f',
+        'm4af',
+        '-d',
+        'aac ',
+        '-b',
+        '32000',
+        '-q',
+        '127',
+      ]);
+      if (encode.exitCode != 0 || !await output.exists()) {
+        throw ProcessException(
+          '/usr/bin/afconvert',
+          const [],
+          encode.stderr.toString(),
+          encode.exitCode,
+        );
+      }
+      return PreparedAudio(file: output, isTemporary: true);
+    } catch (_) {
+      if (await output.exists()) await output.delete();
+      rethrow;
+    } finally {
+      if (await pcm.exists()) await pcm.delete();
+    }
+  }
 }
 
 enum ModalDeploymentState {
@@ -197,6 +272,9 @@ class ModalDeploymentException implements Exception {
 class ModalClient {
   ModalClient(this.settings);
 
+  static const _chunkSize = 5 * 1024 * 1024;
+  static const _chunkAttempts = 4;
+
   final AppSettings settings;
 
   Uri _uri(String path) => Uri.parse(
@@ -208,21 +286,88 @@ class ModalClient {
       'Authorization': 'Bearer ${settings.apiKey}',
   };
 
-  Future<String> submit(Meeting meeting, List<SpeakerProfile> profiles) async {
-    final request = http.MultipartRequest('POST', _uri('/jobs'));
-    request.headers.addAll(_headers);
-    request.fields['meeting_id'] = meeting.id;
-    request.fields['known_profiles'] = jsonEncode(
-      profiles.map((profile) => profile.toApiJson()).toList(),
+  Future<String> submit(
+    Meeting meeting,
+    List<SpeakerProfile> profiles, {
+    File? audioFile,
+    ValueChanged<double>? onUploadProgress,
+  }) async {
+    final audio = audioFile ?? File(meeting.audioPath);
+    final totalBytes = await audio.length();
+    final chunkCount = (totalBytes / _chunkSize).ceil();
+    final audioHash = await sha256.bind(audio.openRead()).first;
+    final initialized = _decode(
+      await http
+          .post(
+            _uri('/uploads'),
+            headers: _headers,
+            body: {
+              'meeting_id': meeting.id,
+              'filename': audio.uri.pathSegments.last,
+              'known_profiles': jsonEncode(
+                profiles.map((profile) => profile.toApiJson()).toList(),
+              ),
+              'match_threshold': settings.matchThreshold.toString(),
+              'total_bytes': totalBytes.toString(),
+              'chunk_count': chunkCount.toString(),
+              'audio_sha256': audioHash.toString(),
+            },
+          )
+          .timeout(const Duration(minutes: 2)),
     );
-    request.fields['match_threshold'] = settings.matchThreshold.toString();
-    request.files.add(
-      await http.MultipartFile.fromPath('audio', meeting.audioPath),
+    final jobId = initialized['job_id'] as String;
+    final input = await audio.open();
+    var uploaded = 0;
+    onUploadProgress?.call(0);
+    try {
+      for (var index = 0; index < chunkCount; index++) {
+        final chunk = await input.read(_chunkSize);
+        await _uploadChunk(jobId, index, chunk);
+        uploaded += chunk.length;
+        onUploadProgress?.call(
+          totalBytes == 0 ? 1 : (uploaded / totalBytes).clamp(0, 1),
+        );
+      }
+      _decode(
+        await http
+            .post(_uri('/uploads/$jobId/complete'), headers: _headers)
+            .timeout(const Duration(minutes: 5)),
+      );
+      onUploadProgress?.call(1);
+      return jobId;
+    } finally {
+      await input.close();
+    }
+  }
+
+  Future<void> _uploadChunk(String jobId, int index, List<int> bytes) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < _chunkAttempts; attempt++) {
+      try {
+        final response = await http
+            .put(
+              _uri('/uploads/$jobId/chunks/$index'),
+              headers: {
+                ..._headers,
+                'Content-Type': 'application/octet-stream',
+                'X-Chunk-SHA256': sha256.convert(bytes).toString(),
+              },
+              body: bytes,
+            )
+            .timeout(const Duration(minutes: 5));
+        _decode(response);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (attempt + 1 < _chunkAttempts) {
+          await Future<void>.delayed(Duration(seconds: 1 << attempt));
+        }
+      }
+    }
+    throw HttpException(
+      'Chunk ${index + 1} could not be uploaded after $_chunkAttempts attempts: '
+      '$lastError',
     );
-    final streamed = await request.send().timeout(const Duration(minutes: 10));
-    final response = await http.Response.fromStream(streamed);
-    final body = _decode(response);
-    return body['job_id'] as String;
   }
 
   Future<Map<String, dynamic>> job(String id) async {

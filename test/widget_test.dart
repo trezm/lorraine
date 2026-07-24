@@ -25,6 +25,8 @@ void main() {
       audioPath: '/tmp/meeting.m4a',
       durationSeconds: 90,
       status: MeetingStatus.ready,
+      processingStage: 'Complete',
+      progress: 1,
       segments: const [
         TranscriptSegment(
           start: 0,
@@ -40,6 +42,8 @@ void main() {
     expect(decoded.title, 'Planning');
     expect(decoded.segments.single.speakerId, 'SPEAKER_00');
     expect(decoded.status, MeetingStatus.ready);
+    expect(decoded.processingStage, 'Complete');
+    expect(decoded.progress, 1);
   });
 
   test('Modal automatic deployment defaults on and persists', () {

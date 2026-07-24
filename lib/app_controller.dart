@@ -12,15 +12,18 @@ class AppController extends ChangeNotifier {
   AppController({
     AppRepository? repository,
     AudioCaptureService? capture,
+    UploadPreparationService? uploadPreparation,
     LocalSummaryService? summary,
     ModalDeploymentService? deployment,
   }) : repository = repository ?? AppRepository(),
        _capture = capture ?? AudioCaptureService(),
+       _uploadPreparation = uploadPreparation ?? UploadPreparationService(),
        _summary = summary ?? LocalSummaryService(),
        _deployment = deployment ?? ModalDeploymentService();
 
   final AppRepository repository;
   final AudioCaptureService _capture;
+  final UploadPreparationService _uploadPreparation;
   final LocalSummaryService _summary;
   final ModalDeploymentService _deployment;
   final _uuid = const Uuid();
@@ -189,29 +192,65 @@ class AppController extends ChangeNotifier {
       return;
     }
     await _replaceMeeting(
-      meeting.copyWith(status: MeetingStatus.uploading, error: null),
+      meeting.copyWith(
+        status: MeetingStatus.uploading,
+        error: null,
+        processingStage: 'Optimizing audio for transcription',
+        progress: 0.01,
+      ),
     );
+    PreparedAudio? prepared;
     try {
-      final jobId = await ModalClient(settings).submit(meeting, profiles);
+      prepared = await _uploadPreparation.prepare(meeting, repository.root);
+      final uploadMegabytes = (await prepared.file.length() / (1024 * 1024))
+          .toStringAsFixed(1);
+      var lastUploadPercent = -1;
+      final jobId = await ModalClient(settings).submit(
+        meeting,
+        profiles,
+        audioFile: prepared.file,
+        onUploadProgress: (value) {
+          final percent = (value * 100).floor();
+          if (percent == lastUploadPercent) return;
+          lastUploadPercent = percent;
+          _updateProgressInMemory(
+            meetingId,
+            stage: 'Uploading $uploadMegabytes MB copy — $percent%',
+            progress: 0.02 + (value * 0.08),
+          );
+        },
+      );
+      await prepared.dispose();
+      prepared = null;
       await _replaceMeeting(
         meeting.copyWith(
           status: MeetingStatus.processing,
           jobId: jobId,
           error: null,
+          processingStage: 'Queued for GPU',
+          progress: 0.1,
         ),
       );
       await _poll(meetingId, jobId);
     } catch (error) {
+      final current = meetingById(meetingId) ?? meeting;
       await _replaceMeeting(
-        meeting.copyWith(status: MeetingStatus.failed, error: error.toString()),
+        current.copyWith(
+          status: MeetingStatus.failed,
+          error: error.toString(),
+          processingStage: 'Failed',
+        ),
       );
+    } finally {
+      await prepared?.dispose();
     }
   }
 
   Future<void> _poll(String meetingId, String jobId) async {
     if (!_polling.add(meetingId)) return;
     try {
-      for (var attempt = 0; attempt < 450; attempt++) {
+      final deadline = DateTime.now().add(const Duration(hours: 3));
+      while (DateTime.now().isBefore(deadline)) {
         final result = await ModalClient(settings).job(jobId);
         final status = result['status'] as String? ?? 'processing';
         if (status == 'failed') {
@@ -221,6 +260,7 @@ class AppController extends ChangeNotifier {
               meeting.copyWith(
                 status: MeetingStatus.failed,
                 error: result['error']?.toString() ?? 'Transcription failed',
+                processingStage: 'Failed',
               ),
             );
           }
@@ -230,11 +270,10 @@ class AppController extends ChangeNotifier {
           await _applyResult(meetingId, result);
           return;
         }
+        await _applyProgress(meetingId, result);
         await Future<void>.delayed(const Duration(seconds: 4));
       }
-      throw TimeoutException(
-        'Transcription did not complete within 30 minutes.',
-      );
+      throw TimeoutException('Transcription did not complete within 3 hours.');
     } catch (error) {
       final meeting = meetingById(meetingId);
       if (meeting != null) {
@@ -242,6 +281,7 @@ class AppController extends ChangeNotifier {
           meeting.copyWith(
             status: MeetingStatus.failed,
             error: error.toString(),
+            processingStage: 'Failed',
           ),
         );
       }
@@ -292,8 +332,53 @@ class AppController extends ChangeNotifier {
             .toList(),
         speakers: speakers,
         error: null,
+        processingStage: 'Complete',
+        progress: 1,
       ),
     );
+  }
+
+  Future<void> _applyProgress(
+    String meetingId,
+    Map<String, dynamic> result,
+  ) async {
+    final meeting = meetingById(meetingId);
+    if (meeting == null) return;
+    final rawStage = result['stage']?.toString() ?? 'processing';
+    final stage = switch (rawStage) {
+      'queued' => 'Queued for GPU',
+      'starting' => 'Starting GPU worker',
+      'transcribing' => 'Transcribing speech',
+      'aligning' => 'Aligning words and timestamps',
+      'diarizing' => 'Identifying distinct speakers',
+      'voices' => 'Creating voice fingerprints and samples',
+      'finalizing' => 'Saving transcript',
+      _ => 'Processing meeting',
+    };
+    final progress = ((result['progress'] as num?)?.toDouble() ?? 0.1).clamp(
+      0.1,
+      0.99,
+    );
+    if (meeting.processingStage == stage && meeting.progress == progress) {
+      return;
+    }
+    await _replaceMeeting(
+      meeting.copyWith(processingStage: stage, progress: progress),
+    );
+  }
+
+  void _updateProgressInMemory(
+    String meetingId, {
+    required String stage,
+    required double progress,
+  }) {
+    final index = meetings.indexWhere((meeting) => meeting.id == meetingId);
+    if (index < 0) return;
+    meetings[index] = meetings[index].copyWith(
+      processingStage: stage,
+      progress: progress.clamp(0, 1),
+    );
+    notifyListeners();
   }
 
   Future<void> identifySpeaker({

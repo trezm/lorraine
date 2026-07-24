@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+const _notSet = Object();
+
 enum MeetingStatus { recorded, uploading, processing, ready, failed }
 
 class TranscriptSegment {
@@ -86,6 +88,8 @@ class Meeting {
     this.language,
     this.summary,
     this.error,
+    this.processingStage,
+    this.progress = 0,
     this.segments = const [],
     this.speakers = const [],
   });
@@ -100,15 +104,19 @@ class Meeting {
   final String? language;
   final String? summary;
   final String? error;
+  final String? processingStage;
+  final double progress;
   final List<TranscriptSegment> segments;
   final List<MeetingSpeaker> speakers;
 
   Meeting copyWith({
     MeetingStatus? status,
-    String? jobId,
-    String? language,
-    String? summary,
-    String? error,
+    Object? jobId = _notSet,
+    Object? language = _notSet,
+    Object? summary = _notSet,
+    Object? error = _notSet,
+    Object? processingStage = _notSet,
+    double? progress,
     List<TranscriptSegment>? segments,
     List<MeetingSpeaker>? speakers,
   }) => Meeting(
@@ -118,10 +126,16 @@ class Meeting {
     audioPath: audioPath,
     durationSeconds: durationSeconds,
     status: status ?? this.status,
-    jobId: jobId ?? this.jobId,
-    language: language ?? this.language,
-    summary: summary ?? this.summary,
-    error: error,
+    jobId: identical(jobId, _notSet) ? this.jobId : jobId as String?,
+    language: identical(language, _notSet)
+        ? this.language
+        : language as String?,
+    summary: identical(summary, _notSet) ? this.summary : summary as String?,
+    error: identical(error, _notSet) ? this.error : error as String?,
+    processingStage: identical(processingStage, _notSet)
+        ? this.processingStage
+        : processingStage as String?,
+    progress: progress ?? this.progress,
     segments: segments ?? this.segments,
     speakers: speakers ?? this.speakers,
   );
@@ -137,6 +151,8 @@ class Meeting {
     language: json['language'] as String?,
     summary: json['summary'] as String?,
     error: json['error'] as String?,
+    processingStage: json['processing_stage'] as String?,
+    progress: ((json['progress'] as num?)?.toDouble() ?? 0).clamp(0, 1),
     segments: (json['segments'] as List<dynamic>? ?? const [])
         .map((item) => TranscriptSegment.fromJson(item as Map<String, dynamic>))
         .toList(),
@@ -156,6 +172,8 @@ class Meeting {
     'language': language,
     'summary': summary,
     'error': error,
+    'processing_stage': processingStage,
+    'progress': progress,
     'segments': segments.map((segment) => segment.toJson()).toList(),
     'speakers': speakers.map((speaker) => speaker.toJson()).toList(),
   };

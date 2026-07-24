@@ -2,6 +2,15 @@
 
 This service accepts a meeting recording, returns immediately with a job ID, and runs WhisperX on an A10G GPU. The app polls until word-aligned transcription, anonymous speaker labels, voice embeddings, and short WAV samples are ready.
 
+Uploads and GPU transcription calls allow up to two hours. The desktop client
+polls an accepted job for up to three hours so queueing time does not consume the
+worker's processing allowance.
+
+The desktop creates a temporary 16 kHz mono AAC copy for transcription, keeps
+the original recording untouched, and uploads the derivative in independently
+checksummed 5 MB chunks. Modal verifies every chunk and the complete file before
+starting WhisperX.
+
 ## Deploy
 
 1. Create a Hugging Face read token and accept the terms for `pyannote/speaker-diarization-community-1`.

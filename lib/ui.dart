@@ -179,8 +179,34 @@ class MeetingsPage extends StatelessWidget {
                     ),
                     subtitle: Padding(
                       padding: const EdgeInsets.only(top: 5),
-                      child: Text(
-                        '${_date(meeting.createdAt)}  •  ${_duration(meeting.durationSeconds)}  •  ${_status(meeting.status)}',
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${_date(meeting.createdAt)}  •  ${_duration(meeting.durationSeconds)}  •  ${_status(meeting.status)}',
+                          ),
+                          if (meeting.status == MeetingStatus.uploading ||
+                              meeting.status == MeetingStatus.processing) ...[
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: LinearProgressIndicator(
+                                    value: meeting.progress,
+                                    minHeight: 6,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Text('${(meeting.progress * 100).round()}%'),
+                              ],
+                            ),
+                            const SizedBox(height: 5),
+                            Text(
+                              meeting.processingStage ?? 'Processing meeting',
+                            ),
+                          ],
+                        ],
                       ),
                     ),
                     trailing: const Icon(Icons.chevron_right),
@@ -288,7 +314,7 @@ class MeetingPage extends StatelessWidget {
       child:
           meeting.status == MeetingStatus.uploading ||
               meeting.status == MeetingStatus.processing
-          ? _Processing(status: meeting.status)
+          ? _Processing(meeting: meeting)
           : meeting.segments.isEmpty
           ? _EmptyState(
               icon: Icons.description_outlined,
@@ -947,28 +973,57 @@ class _EmptyState extends StatelessWidget {
 }
 
 class _Processing extends StatelessWidget {
-  const _Processing({required this.status});
-  final MeetingStatus status;
+  const _Processing({required this.meeting});
+  final Meeting meeting;
   @override
   Widget build(BuildContext context) => Center(
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const SizedBox.square(
-          dimension: 38,
-          child: CircularProgressIndicator(),
+    child: SizedBox(
+      width: 520,
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '${(meeting.progress * 100).round()}%',
+                style: Theme.of(
+                  context,
+                ).textTheme.displaySmall?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                meeting.processingStage ?? 'Processing meeting',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 20),
+              LinearProgressIndicator(
+                value: meeting.progress,
+                minHeight: 10,
+                borderRadius: BorderRadius.circular(6),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                meeting.status == MeetingStatus.uploading
+                    ? 'Upload progress is exact. Overall processing progress is estimated.'
+                    : 'Estimated overall progress based on the current WhisperX stage.',
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Upload  →  Transcribe  →  Align  →  Diarize  →  Voice profiles',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 10),
+              const Text(
+                'You can leave this page; Lorraine will keep checking the job.',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
         ),
-        const SizedBox(height: 18),
-        Text(
-          status == MeetingStatus.uploading
-              ? 'Uploading recording…'
-              : 'WhisperX is transcribing and finding speakers…',
-        ),
-        const SizedBox(height: 8),
-        const Text(
-          'You can leave this page; Lorraine will keep checking the job.',
-        ),
-      ],
+      ),
     ),
   );
 }
