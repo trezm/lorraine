@@ -1,8 +1,9 @@
 """Modal deployment for Lorraine's WhisperX transcription service.
 
 Deploy with: modal deploy backend/modal_app.py
-Required secret: HF_TOKEN in a Modal secret named ``lorraine-secrets``.
-Optional secret: LORRAINE_API_KEY in the same secret.
+Required secrets:
+- HF_TOKEN in a Modal secret named ``lorraine-secrets``.
+- LORRAINE_API_KEY in a separate secret named ``lorraine-api-auth``.
 """
 
 from __future__ import annotations
@@ -29,7 +30,12 @@ app = modal.App(APP_NAME)
 data_volume = modal.Volume.from_name("lorraine-data", create_if_missing=True)
 model_cache = modal.Volume.from_name("lorraine-model-cache", create_if_missing=True)
 secret_name = os.environ.get("LORRAINE_MODAL_SECRET", "lorraine-secrets")
-secrets = [modal.Secret.from_name(secret_name)]
+api_secret_name = os.environ.get("LORRAINE_MODAL_API_SECRET", "lorraine-api-auth")
+transcription_secrets = [modal.Secret.from_name(secret_name)]
+api_secrets = [
+    *transcription_secrets,
+    modal.Secret.from_name(api_secret_name),
+]
 
 web_image = modal.Image.debian_slim(python_version="3.12").pip_install(
     "fastapi[standard]==0.116.1",
@@ -66,25 +72,46 @@ def _best_match(
     embedding: list[float],
     profiles: list[dict[str, Any]],
     threshold: float,
+    enriched_threshold: float,
+    required_margin: float,
 ) -> tuple[str | None, float | None]:
     import numpy as np
 
     if not embedding or not profiles:
         return None, None
     target = np.asarray(_normalise(embedding), dtype=np.float32)
-    best_id: str | None = None
-    best_score = -1.0
+    scored: list[tuple[str, float, int]] = []
     for profile in profiles:
-        candidate_values = profile.get("embedding") or []
-        if len(candidate_values) != len(target):
+        stored_samples = profile.get("embeddings") or []
+        if not stored_samples and profile.get("embedding"):
+            stored_samples = [profile["embedding"]]
+        candidates = [
+            np.asarray(_normalise(values), dtype=np.float32)
+            for values in stored_samples
+            if len(values) == len(target)
+        ]
+        if not candidates:
             continue
-        candidate = np.asarray(_normalise(candidate_values), dtype=np.float32)
-        score = float(np.dot(target, candidate))
-        if score > best_score:
-            best_id, best_score = str(profile["id"]), score
-    if best_score < threshold:
-        return None, best_score if best_score >= 0 else None
-    return best_id, best_score
+        centroid = np.asarray(
+            _normalise(np.mean(candidates, axis=0).tolist()),
+            dtype=np.float32,
+        )
+        centroid_score = float(np.dot(target, centroid))
+        sample_score = max(float(np.dot(target, candidate)) for candidate in candidates)
+        score = max(centroid_score, sample_score)
+        scored.append((str(profile["id"]), score, len(candidates)))
+    if not scored:
+        return None, None
+    scored.sort(key=lambda item: item[1], reverse=True)
+    best_id, best_score, enrollment_count = scored[0]
+    runner_up_score = scored[1][1] if len(scored) > 1 else None
+    margin = float("inf") if runner_up_score is None else best_score - runner_up_score
+    accepted = best_score >= threshold or (
+        enrollment_count >= 2
+        and best_score >= enriched_threshold
+        and margin >= required_margin
+    )
+    return (best_id if accepted else None), best_score
 
 
 def _speaker_sample(
@@ -127,9 +154,15 @@ def _speaker_sample(
     gpu="A10G",
     timeout=LONG_REQUEST_TIMEOUT_SECONDS,
     volumes={"/data": data_volume, CACHE_ROOT: model_cache},
-    secrets=secrets,
+    secrets=transcription_secrets,
 )
-def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: float) -> None:
+def transcribe(
+    job_id: str,
+    known_profiles: list[dict[str, Any]],
+    threshold: float,
+    enriched_threshold: float,
+    required_margin: float,
+) -> None:
     """Transcribe one persisted input and store a JSON result for polling."""
     import gc
 
@@ -222,7 +255,13 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
         speaker_results = []
         for speaker in sorted(diarization["speaker"].unique().tolist()):
             embedding = _normalise((embeddings or {}).get(speaker, []))
-            match_id, confidence = _best_match(embedding, known_profiles, threshold)
+            match_id, confidence = _best_match(
+                embedding,
+                known_profiles,
+                threshold,
+                enriched_threshold,
+                required_margin,
+            )
             sample_path = directory / f"sample-{speaker}.wav"
             sample = _speaker_sample(audio_path, diarization, speaker, sample_path)
             speaker_results.append(
@@ -269,7 +308,7 @@ def transcribe(job_id: str, known_profiles: list[dict[str, Any]], threshold: flo
     # Large meeting uploads can keep this request open for several minutes.
     timeout=LONG_REQUEST_TIMEOUT_SECONDS,
     volumes={"/data": data_volume},
-    secrets=secrets,
+    secrets=api_secrets,
 )
 @modal.asgi_app()
 def api():
@@ -284,7 +323,10 @@ def api():
     def authorize(authorization: str | None) -> None:
         expected = os.environ.get("LORRAINE_API_KEY", "")
         if not expected:
-            return
+            raise HTTPException(
+                status_code=503,
+                detail="API authentication is not configured",
+            )
         supplied = (authorization or "").removeprefix("Bearer ")
         if not hmac.compare_digest(supplied, expected):
             raise HTTPException(status_code=401, detail="Invalid API key")
@@ -305,7 +347,9 @@ def api():
         meeting_id: str = Form(...),
         filename: str = Form(...),
         known_profiles: str = Form("[]"),
-        match_threshold: float = Form(0.72),
+        match_threshold: float = Form(0.75),
+        enriched_match_threshold: float = Form(0.60),
+        match_margin: float = Form(0.25),
         total_bytes: int = Form(...),
         chunk_count: int = Form(...),
         audio_sha256: str = Form(...),
@@ -330,6 +374,10 @@ def api():
             "suffix": suffix,
             "profiles": profiles,
             "match_threshold": max(0.0, min(1.0, match_threshold)),
+            "enriched_match_threshold": max(
+                0.0, min(1.0, enriched_match_threshold)
+            ),
+            "match_margin": max(0.0, min(1.0, match_margin)),
             "total_bytes": total_bytes,
             "chunk_count": chunk_count,
             "audio_sha256": audio_sha256,
@@ -427,6 +475,8 @@ def api():
             job_id,
             metadata["profiles"],
             float(metadata["match_threshold"]),
+            float(metadata.get("enriched_match_threshold", 0.60)),
+            float(metadata.get("match_margin", 0.25)),
         )
         for chunk in chunks:
             chunk.unlink(missing_ok=True)
@@ -439,7 +489,9 @@ def api():
         audio: UploadFile = File(...),
         meeting_id: str = Form(...),
         known_profiles: str = Form("[]"),
-        match_threshold: float = Form(0.72),
+        match_threshold: float = Form(0.75),
+        enriched_match_threshold: float = Form(0.60),
+        match_margin: float = Form(0.25),
         authorization: str | None = Header(None),
     ):
         authorize(authorization)
@@ -462,7 +514,13 @@ def api():
             {"status": "processing", "stage": "queued", "progress": 0.1},
         )
         data_volume.commit()
-        transcribe.spawn(job_id, profiles, max(0.0, min(1.0, match_threshold)))
+        transcribe.spawn(
+            job_id,
+            profiles,
+            max(0.0, min(1.0, match_threshold)),
+            max(0.0, min(1.0, enriched_match_threshold)),
+            max(0.0, min(1.0, match_margin)),
+        )
         return {"job_id": job_id, "status": "processing"}
 
     @web.get("/jobs/{job_id}")

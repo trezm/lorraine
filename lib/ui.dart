@@ -83,7 +83,7 @@ class _LorraineShellState extends State<LorraineShell> {
                     if (widget.controller.isRecording)
                       RecordingBar(
                         elapsed: widget.controller.recordingElapsed,
-                        stopping: widget.controller.busy,
+                        stopping: widget.controller.isStoppingRecording,
                         onStop: () async {
                           final id = await widget.controller.stopRecording();
                           if (id != null) {
@@ -302,11 +302,20 @@ class MeetingPage extends StatelessWidget {
           if (meeting.segments.isNotEmpty) ...[
             const SizedBox(width: 10),
             FilledButton.tonalIcon(
-              onPressed: controller.busy
+              onPressed: controller.isSummarizing
                   ? null
                   : () => controller.summarize(meeting.id),
-              icon: const Icon(Icons.auto_awesome),
-              label: const Text('Summarize locally'),
+              icon: controller.isSummarizing
+                  ? const SizedBox.square(
+                      dimension: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.auto_awesome),
+              label: Text(
+                controller.isSummarizing
+                    ? 'Preparing local summary…'
+                    : 'Summarize locally',
+              ),
             ),
           ],
         ],
@@ -502,7 +511,10 @@ class _VoicesPageState extends State<VoicesPage> {
             ...widget.controller.profiles.map(
               (profile) => _VoiceCard(
                 title: profile.name,
-                subtitle: profile.email.isEmpty ? 'No email' : profile.email,
+                subtitle:
+                    '${profile.email.isEmpty ? 'No email' : profile.email}  •  '
+                    '${profile.enrollmentCount} confirmed voice '
+                    '${profile.enrollmentCount == 1 ? 'sample' : 'samples'}',
                 samplePath: profile.samplePath,
                 onPlay: () => _play(profile.samplePath),
               ),
@@ -574,6 +586,8 @@ class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController ollama;
   late final TextEditingController model;
   late double threshold;
+  late double enrichedThreshold;
+  late double matchMargin;
   late bool autoDeployModal;
 
   @override
@@ -585,6 +599,8 @@ class _SettingsPageState extends State<SettingsPage> {
     ollama = TextEditingController(text: settings.ollamaUrl);
     model = TextEditingController(text: settings.ollamaModel);
     threshold = settings.matchThreshold;
+    enrichedThreshold = settings.enrichedMatchThreshold;
+    matchMargin = settings.matchMargin;
     autoDeployModal = settings.autoDeployModal;
   }
 
@@ -642,17 +658,50 @@ class _SettingsPageState extends State<SettingsPage> {
                 controller: apiKey,
                 obscureText: true,
                 decoration: const InputDecoration(
-                  labelText: 'API key (optional)',
+                  labelText: 'API key',
+                  helperText: 'Required for authenticated Modal requests.',
                 ),
               ),
               const SizedBox(height: 18),
-              Text('Voice match threshold: ${threshold.toStringAsFixed(2)}'),
+              Text('Strict voice threshold: ${threshold.toStringAsFixed(2)}'),
+              const Text(
+                'Applied to every profile, including profiles with one sample.',
+              ),
               Slider(
                 value: threshold,
-                min: 0.55,
+                min: 0.60,
                 max: 0.90,
-                divisions: 35,
-                onChanged: (value) => setState(() => threshold = value),
+                divisions: 30,
+                onChanged: (value) => setState(() {
+                  threshold = value;
+                  if (enrichedThreshold > value) enrichedThreshold = value;
+                }),
+              ),
+              Text(
+                'Enriched-profile minimum: '
+                '${enrichedThreshold.toStringAsFixed(2)}',
+              ),
+              const Text(
+                'Only profiles with at least two confirmed samples can use this lower threshold.',
+              ),
+              Slider(
+                value: enrichedThreshold.clamp(0.50, threshold),
+                min: 0.50,
+                max: threshold,
+                divisions: ((threshold - 0.50) * 100).round(),
+                onChanged: (value) => setState(() => enrichedThreshold = value),
+              ),
+              Text(
+                'Required lead over runner-up: '
+                '${matchMargin.toStringAsFixed(2)}',
+              ),
+              const Text('Higher values reduce ambiguous automatic matches.'),
+              Slider(
+                value: matchMargin,
+                min: 0.10,
+                max: 0.40,
+                divisions: 30,
+                onChanged: (value) => setState(() => matchMargin = value),
               ),
               Align(
                 alignment: Alignment.centerRight,
@@ -711,6 +760,8 @@ class _SettingsPageState extends State<SettingsPage> {
                           ollamaUrl: ollama.text.trim(),
                           ollamaModel: model.text.trim(),
                           matchThreshold: threshold,
+                          enrichedMatchThreshold: enrichedThreshold,
+                          matchMargin: matchMargin,
                         ),
                       );
                       if (!context.mounted) return;
@@ -1091,11 +1142,66 @@ Future<void> _identifyDialog(
     ),
   );
   if (accepted == true) {
+    final suggested = controller.suggestedProfile(
+      name: name.text,
+      email: email.text,
+    );
+    bool? merge;
+    if (suggested != null) {
+      if (!context.mounted) return;
+      merge = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Existing person found'),
+          content: SizedBox(
+            width: 440,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'This identity matches an existing person. Do you want to merge this voice with that profile?',
+                ),
+                const SizedBox(height: 18),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: const CircleAvatar(child: Icon(Icons.person)),
+                  title: Text(suggested.name),
+                  subtitle: suggested.email.isEmpty
+                      ? const Text('No email saved')
+                      : Text(suggested.email),
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'Keeping them separate creates another person with the entered name.',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            OutlinedButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Keep separate'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Merge profiles'),
+            ),
+          ],
+        ),
+      );
+      if (merge == null) return;
+    }
     await controller.identifySpeaker(
       meetingId: meeting.id,
       speakerId: speaker.id,
       name: name.text,
       email: email.text,
+      mergeWithProfileId: merge == true ? suggested?.id : null,
     );
   }
 }

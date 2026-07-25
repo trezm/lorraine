@@ -21,15 +21,23 @@ starting WhisperX.
    modal setup
    ```
 
-3. Add the required token and an optional app API key:
+3. Store the required Hugging Face token:
 
    ```sh
-   modal secret create lorraine-secrets HF_TOKEN=hf_... LORRAINE_API_KEY=choose-a-long-random-value
+   modal secret create lorraine-secrets HF_TOKEN=hf_...
    ```
 
    If `lorraine-secrets` does not exist, startup also recognizes existing secrets named `huggingface` or `huggingface-secret`.
 
-4. Launch Lorraine. It automatically deploys this bundled backend with:
+4. Generate a long random API key and store it in the separate authentication secret:
+
+   ```sh
+   modal secret create lorraine-api-auth LORRAINE_API_KEY=choose-a-long-random-value
+   ```
+
+   The backend fails closed if this secret or key is missing. Enter the same value in Lorraine Settings; it is sent as a bearer token with every upload and job request.
+
+5. Launch Lorraine. It automatically deploys this bundled backend with:
 
    ```sh
    modal deploy backend/modal_app.py
@@ -37,6 +45,6 @@ starting WhisperX.
 
    You can also run that command manually while developing.
 
-5. If you set `LORRAINE_API_KEY`, enter the same value in Lorraine Settings. The endpoint URL is discovered and saved automatically.
+6. The endpoint URL is discovered and saved automatically. The unauthenticated health check exposes no meeting data; all upload and job endpoints require the API key.
 
 The input recording is deleted from the Modal Volume after a successful run. Job results remain in `lorraine-data`; model weights are cached in `lorraine-model-cache` to reduce cold starts.

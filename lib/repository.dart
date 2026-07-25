@@ -39,6 +39,10 @@ class AppRepository {
       );
     }
     await _migrateLegacySandbox(hadCurrentState: hadCurrentState);
+    var stateChanged = _learnConfirmedSpeakers();
+    if (reconcileAutomaticSpeakerMatches()) stateChanged = true;
+    if (_recoverInterruptedTranscriptions()) stateChanged = true;
+    if (stateChanged) await save();
   }
 
   void _loadState(Map<String, dynamic> raw) {
@@ -141,10 +145,83 @@ class AppRepository {
         id: profile.id,
         name: profile.name,
         email: profile.email,
-        embedding: profile.embedding,
+        embeddings: profile.embeddings,
         samplePath: await _copyLegacyFile(profile.samplePath, samplesDirectory),
         createdAt: profile.createdAt,
       );
+
+  bool _learnConfirmedSpeakers() {
+    var changed = false;
+    for (final meeting in meetings) {
+      for (final speaker in meeting.speakers) {
+        final profileId = speaker.profileId;
+        if (!speaker.identityConfirmed || profileId == null) continue;
+        final index = profiles.indexWhere((profile) => profile.id == profileId);
+        if (index < 0) continue;
+        final enrolled = profiles[index].enroll(speaker.embedding);
+        if (enrolled.enrollmentCount != profiles[index].enrollmentCount) {
+          profiles[index] = enrolled;
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  bool reconcileAutomaticSpeakerMatches() {
+    var changed = false;
+    for (var meetingIndex = 0; meetingIndex < meetings.length; meetingIndex++) {
+      final meeting = meetings[meetingIndex];
+      var meetingChanged = false;
+      final speakers = meeting.speakers.map((speaker) {
+        if (speaker.identityConfirmed) return speaker;
+        final match = matchVoiceProfile(
+          speaker.embedding,
+          profiles,
+          threshold: settings.matchThreshold,
+          enrichedThreshold: settings.enrichedMatchThreshold,
+          requiredMargin: settings.matchMargin,
+        );
+        final profileId = (match?.accepted ?? false) ? match!.profile.id : null;
+        final confidence = match?.score;
+        if (speaker.profileId == profileId &&
+            speaker.matchConfidence == confidence) {
+          return speaker;
+        }
+        meetingChanged = true;
+        return speaker.copyWith(
+          profileId: profileId,
+          matchConfidence: confidence,
+        );
+      }).toList();
+      if (meetingChanged) {
+        meetings[meetingIndex] = meeting.copyWith(speakers: speakers);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  bool _recoverInterruptedTranscriptions() {
+    var changed = false;
+    for (var index = 0; index < meetings.length; index++) {
+      final meeting = meetings[index];
+      final interruptedBeforeJob =
+          meeting.status == MeetingStatus.uploading ||
+          (meeting.status == MeetingStatus.processing && meeting.jobId == null);
+      if (!interruptedBeforeJob) continue;
+      meetings[index] = meeting.copyWith(
+        status: MeetingStatus.failed,
+        error:
+            'Local preparation or upload was interrupted before Modal returned '
+            'a job ID. The original recording is safe; retry transcription.',
+        processingStage: 'Interrupted — ready to retry',
+        progress: 0,
+      );
+      changed = true;
+    }
+    return changed;
+  }
 
   Future<String> _copyLegacyFile(
     String sourcePath,
@@ -173,7 +250,7 @@ class AppRepository {
 
   Future<void> save() async {
     final state = prettyJson({
-      'version': 1,
+      'version': 2,
       'meetings': meetings.map((meeting) => meeting.toJson()).toList(),
       'profiles': profiles.map((profile) => profile.toJson()).toList(),
       'settings': settings.toJson(),

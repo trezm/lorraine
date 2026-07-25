@@ -32,7 +32,8 @@ class AppController extends ChangeNotifier {
   bool initialized = false;
   bool captureSupported = false;
   bool isRecording = false;
-  bool busy = false;
+  bool isStoppingRecording = false;
+  bool isSummarizing = false;
   String? notice;
   ModalDeploymentState modalDeploymentState = ModalDeploymentState.idle;
   String? modalDeploymentMessage;
@@ -154,8 +155,8 @@ class AppController extends ChangeNotifier {
   }
 
   Future<String?> stopRecording() async {
-    if (!isRecording) return null;
-    busy = true;
+    if (!isRecording || isStoppingRecording) return null;
+    isStoppingRecording = true;
     _timer?.cancel();
     notifyListeners();
     try {
@@ -171,12 +172,12 @@ class AppController extends ChangeNotifier {
       repository.meetings.insert(0, meeting);
       await repository.save();
       isRecording = false;
-      busy = false;
+      isStoppingRecording = false;
       notifyListeners();
       if (settings.modalConfigured) unawaited(transcribe(meeting.id));
       return meeting.id;
     } catch (error) {
-      busy = false;
+      isStoppingRecording = false;
       notice = 'Could not finish recording: $error';
       notifyListeners();
       return null;
@@ -381,67 +382,107 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  SpeakerProfile? suggestedProfile({
+    required String name,
+    required String email,
+  }) {
+    final normalizedEmail = email.trim().toLowerCase();
+    if (normalizedEmail.isNotEmpty) {
+      final emailMatch = profiles
+          .where(
+            (profile) => profile.email.trim().toLowerCase() == normalizedEmail,
+          )
+          .firstOrNull;
+      if (emailMatch != null) return emailMatch;
+    }
+    final normalizedName = name.trim().toLowerCase();
+    if (normalizedName.isEmpty) return null;
+    return profiles
+        .where((profile) => profile.name.trim().toLowerCase() == normalizedName)
+        .firstOrNull;
+  }
+
   Future<void> identifySpeaker({
     required String meetingId,
     required String speakerId,
     required String name,
     required String email,
+    String? mergeWithProfileId,
   }) async {
     final meeting = meetingById(meetingId);
     if (meeting == null) return;
     final speaker = meeting.speakers
         .where((item) => item.id == speakerId)
         .first;
-    var existing = profiles
-        .where(
-          (item) =>
-              email.isNotEmpty &&
-              item.email.toLowerCase() == email.toLowerCase(),
-        )
-        .firstOrNull;
-    existing ??= profiles
-        .where((item) => item.name.toLowerCase() == name.trim().toLowerCase())
-        .firstOrNull;
-    final profile =
-        existing ??
-        SpeakerProfile(
-          id: _uuid.v4(),
-          name: name.trim(),
-          email: email.trim(),
-          embedding: speaker.embedding,
-          samplePath: speaker.samplePath ?? '',
-          createdAt: DateTime.now(),
-        );
-    if (existing == null) repository.profiles.add(profile);
+    final existing = mergeWithProfileId == null
+        ? null
+        : profileById(mergeWithProfileId);
+    if (mergeWithProfileId != null && existing == null) {
+      throw StateError('The selected voice profile no longer exists.');
+    }
+    late final SpeakerProfile profile;
+    if (existing == null) {
+      profile = SpeakerProfile(
+        id: _uuid.v4(),
+        name: name.trim(),
+        email: email.trim(),
+        embeddings: [speaker.embedding],
+        samplePath: speaker.samplePath ?? '',
+        createdAt: DateTime.now(),
+      );
+      repository.profiles.add(profile);
+    } else {
+      profile = existing.enroll(speaker.embedding);
+      final profileIndex = profiles.indexWhere(
+        (item) => item.id == existing.id,
+      );
+      repository.profiles[profileIndex] = profile;
+    }
     final updatedSpeakers = meeting.speakers
         .map(
           (item) => item.id == speakerId
-              ? item.copyWith(profileId: profile.id)
+              ? item.copyWith(profileId: profile.id, identityConfirmed: true)
               : item,
         )
         .toList();
     await _replaceMeeting(meeting.copyWith(speakers: updatedSpeakers));
+    if (repository.reconcileAutomaticSpeakerMatches()) {
+      await repository.save();
+      notifyListeners();
+    }
   }
 
   Future<void> summarize(String meetingId) async {
     final meeting = meetingById(meetingId);
-    if (meeting == null || meeting.segments.isEmpty) return;
-    busy = true;
+    if (meeting == null || meeting.segments.isEmpty || isSummarizing) return;
+    isSummarizing = true;
     notice = null;
     notifyListeners();
     try {
-      final summary = await _summary.summarize(meeting, settings);
+      final summary = await _summary.summarize(
+        meeting,
+        settings,
+        onProgress: (update) {
+          final progress = update.progress;
+          notice = progress == null
+              ? update.message
+              : '${update.message} ${(progress * 100).round()}%';
+          notifyListeners();
+        },
+      );
       await _replaceMeeting(meeting.copyWith(summary: summary));
+      notice = null;
     } catch (error) {
       notice = 'Local summary failed: $error';
     } finally {
-      busy = false;
+      isSummarizing = false;
       notifyListeners();
     }
   }
 
   Future<void> saveSettings(AppSettings value) async {
     repository.settings = value;
+    repository.reconcileAutomaticSpeakerMatches();
     await repository.save();
     notifyListeners();
   }

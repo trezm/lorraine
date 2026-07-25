@@ -14,13 +14,21 @@ void main() {
       addTearDown(() => server.close(force: true));
       var chunksReceived = 0;
       var completed = false;
+      const apiKey = 'test-api-key';
       server.listen((request) async {
+        expect(
+          request.headers.value(HttpHeaders.authorizationHeader),
+          'Bearer $apiKey',
+        );
         final body = await request.fold<List<int>>(
           <int>[],
           (bytes, chunk) => bytes..addAll(chunk),
         );
         request.response.headers.contentType = ContentType.json;
         if (request.method == 'POST' && request.uri.path == '/uploads') {
+          final form = utf8.decode(body);
+          expect(form, contains('enriched_match_threshold=0.61'));
+          expect(form, contains('match_margin=0.27'));
           request.response
             ..statusCode = HttpStatus.created
             ..write(jsonEncode({'job_id': 'job-1'}));
@@ -63,7 +71,12 @@ void main() {
       );
 
       final jobId = await ModalClient(
-        AppSettings(modalBaseUrl: 'http://127.0.0.1:${server.port}'),
+        AppSettings(
+          modalBaseUrl: 'http://127.0.0.1:${server.port}',
+          apiKey: apiKey,
+          enrichedMatchThreshold: 0.61,
+          matchMargin: 0.27,
+        ),
       ).submit(meeting, const [], onUploadProgress: progress.add);
 
       expect(jobId, 'job-1');

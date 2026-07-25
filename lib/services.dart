@@ -308,6 +308,9 @@ class ModalClient {
                 profiles.map((profile) => profile.toApiJson()).toList(),
               ),
               'match_threshold': settings.matchThreshold.toString(),
+              'enriched_match_threshold': settings.enrichedMatchThreshold
+                  .toString(),
+              'match_margin': settings.matchMargin.toString(),
               'total_bytes': totalBytes.toString(),
               'chunk_count': chunkCount.toString(),
               'audio_sha256': audioHash.toString(),
@@ -391,7 +394,11 @@ class ModalClient {
 }
 
 class LocalSummaryService {
-  Future<String> summarize(Meeting meeting, AppSettings settings) async {
+  Future<String> summarize(
+    Meeting meeting,
+    AppSettings settings, {
+    ValueChanged<LocalSummaryProgress>? onProgress,
+  }) async {
     final transcript = meeting.segments
         .map((segment) => '[${segment.speakerId}] ${segment.text}')
         .join('\n');
@@ -401,6 +408,12 @@ class LocalSummaryService {
     final prompt =
         '''Summarize this meeting transcript. Return concise Markdown with these exact sections: Summary, Decisions, Action items, Open questions. Preserve names as shown and do not invent facts. If a section has no items, say "None recorded".\n\n$limited''';
     final base = settings.ollamaUrl.replaceFirst(RegExp(r'/+$'), '');
+    await _ensureModel(base, settings.ollamaModel, onProgress: onProgress);
+    onProgress?.call(
+      LocalSummaryProgress(
+        message: 'Generating summary with ${settings.ollamaModel}…',
+      ),
+    );
     final response = await http
         .post(
           Uri.parse('$base/api/generate'),
@@ -421,4 +434,98 @@ class LocalSummaryService {
             as String? ??
         '';
   }
+
+  Future<void> _ensureModel(
+    String base,
+    String model, {
+    ValueChanged<LocalSummaryProgress>? onProgress,
+  }) async {
+    onProgress?.call(
+      LocalSummaryProgress(message: 'Checking for local model $model…'),
+    );
+    final show = await http
+        .post(
+          Uri.parse('$base/api/show'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'model': model}),
+        )
+        .timeout(const Duration(seconds: 15));
+    if (show.statusCode >= 200 && show.statusCode < 300) return;
+    if (show.statusCode != HttpStatus.notFound) {
+      throw HttpException(
+        'Could not check Ollama model $model: '
+        '${show.statusCode} ${_ollamaError(show.body)}',
+      );
+    }
+
+    onProgress?.call(
+      LocalSummaryProgress(message: 'Downloading $model…', progress: 0),
+    );
+    final client = http.Client();
+    try {
+      final request = http.Request('POST', Uri.parse('$base/api/pull'))
+        ..headers['Content-Type'] = 'application/json'
+        ..body = jsonEncode({'model': model, 'stream': true});
+      final response = await client
+          .send(request)
+          .timeout(const Duration(seconds: 30));
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        final body = await response.stream.bytesToString();
+        throw HttpException(
+          'Could not download Ollama model $model: '
+          '${response.statusCode} ${_ollamaError(body)}',
+        );
+      }
+
+      var completed = false;
+      final lines = response.stream
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .timeout(const Duration(minutes: 30));
+      await for (final line in lines) {
+        if (line.trim().isEmpty) continue;
+        final update = jsonDecode(line) as Map<String, dynamic>;
+        final error = update['error']?.toString();
+        if (error != null && error.isNotEmpty) {
+          throw HttpException('Could not download Ollama model $model: $error');
+        }
+        final status = update['status']?.toString() ?? 'Downloading';
+        final total = (update['total'] as num?)?.toDouble();
+        final downloaded = (update['completed'] as num?)?.toDouble();
+        final progress = total != null && total > 0 && downloaded != null
+            ? (downloaded / total).clamp(0.0, 1.0)
+            : null;
+        onProgress?.call(
+          LocalSummaryProgress(
+            message: status == 'success' ? '$model is ready.' : status,
+            progress: status == 'success' ? 1 : progress,
+          ),
+        );
+        if (status == 'success') completed = true;
+      }
+      if (!completed) {
+        throw HttpException(
+          'Ollama ended the $model download before reporting success.',
+        );
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  String _ollamaError(String body) {
+    try {
+      final decoded = jsonDecode(body) as Map<String, dynamic>;
+      return decoded['error']?.toString() ?? body;
+    } on FormatException {
+      return body;
+    }
+  }
+}
+
+class LocalSummaryProgress {
+  const LocalSummaryProgress({required this.message, this.progress});
+
+  final String message;
+  final double? progress;
 }
