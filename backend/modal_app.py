@@ -20,7 +20,6 @@ from typing import Any
 
 import modal
 
-
 APP_NAME = "lorraine-transcription"
 DATA_ROOT = Path("/data/jobs")
 CACHE_ROOT = "/cache"
@@ -225,7 +224,9 @@ def transcribe(
         data_volume.commit()
         hf_token = os.environ.get("HF_TOKEN")
         if not hf_token:
-            raise RuntimeError("HF_TOKEN is missing from the lorraine-secrets Modal secret")
+            raise RuntimeError(
+                "HF_TOKEN is missing from the lorraine-secrets Modal secret"
+            )
         diarizer = DiarizationPipeline(
             token=hf_token,
             device=device,
@@ -359,7 +360,9 @@ def api():
         del meeting_id
         profiles = json.loads(known_profiles)
         if not isinstance(profiles, list):
-            raise HTTPException(status_code=400, detail="known_profiles must be a JSON list")
+            raise HTTPException(
+                status_code=400, detail="known_profiles must be a JSON list"
+            )
         if total_bytes <= 0 or chunk_count <= 0 or chunk_count > 10_000:
             raise HTTPException(status_code=400, detail="Invalid upload size")
         if len(audio_sha256) != 64:
@@ -374,9 +377,7 @@ def api():
             "suffix": suffix,
             "profiles": profiles,
             "match_threshold": max(0.0, min(1.0, match_threshold)),
-            "enriched_match_threshold": max(
-                0.0, min(1.0, enriched_match_threshold)
-            ),
+            "enriched_match_threshold": max(0.0, min(1.0, enriched_match_threshold)),
             "match_margin": max(0.0, min(1.0, match_margin)),
             "total_bytes": total_bytes,
             "chunk_count": chunk_count,
@@ -465,7 +466,9 @@ def api():
             digest.hexdigest(), str(metadata["audio_sha256"])
         ):
             destination.unlink(missing_ok=True)
-            raise HTTPException(status_code=409, detail="Completed upload checksum mismatch")
+            raise HTTPException(
+                status_code=409, detail="Completed upload checksum mismatch"
+            )
         _write_status(
             job_id,
             {"status": "processing", "stage": "queued", "progress": 0.1},
@@ -498,7 +501,9 @@ def api():
         del meeting_id  # The client owns meeting metadata; Modal only needs a job ID.
         profiles = json.loads(known_profiles)
         if not isinstance(profiles, list):
-            raise HTTPException(status_code=400, detail="known_profiles must be a JSON list")
+            raise HTTPException(
+                status_code=400, detail="known_profiles must be a JSON list"
+            )
         job_id = str(uuid.uuid4())
         suffix = Path(audio.filename or "recording.m4a").suffix.lower()
         if suffix not in {".m4a", ".mp3", ".wav", ".mp4", ".webm", ".ogg"}:

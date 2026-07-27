@@ -1,0 +1,29 @@
+# Lint/format configuration for the Python backend (see backend/modal_app.py).
+# Run locally with: ruff check backend && ruff format --check backend
+target-version = "py312"
+line-length = 88
+
+[lint]
+select = [
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "W",   # pycodestyle warnings
+  "I",   # import sorting
+  "B",   # bugbear
+  "UP",  # pyupgrade
+  "SIM", # flake8-simplify
+  "C4",  # comprehensions
+]
+# Line length is enforced by `ruff format`, which cannot split long string
+# literals; leaving E501 on would flag lines the formatter refuses to fix.
+ignore = ["E501"]
+
+[lint.flake8-bugbear]
+# FastAPI's dependency markers are called in argument defaults by design.
+extend-immutable-calls = [
+  "fastapi.Depends",
+  "fastapi.File",
+  "fastapi.Form",
+  "fastapi.Header",
+  "fastapi.Query",
+]

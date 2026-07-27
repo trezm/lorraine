@@ -123,7 +123,10 @@ void main() {
       return {
         'choices': [
           {
-            'message': {'role': 'assistant', 'content': '# Summary\nFrom OpenAI'},
+            'message': {
+              'role': 'assistant',
+              'content': '# Summary\nFrom OpenAI',
+            },
           },
         ],
       };
