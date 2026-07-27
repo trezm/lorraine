@@ -13,18 +13,18 @@ class AppController extends ChangeNotifier {
     AppRepository? repository,
     AudioCaptureService? capture,
     UploadPreparationService? uploadPreparation,
-    LocalSummaryService? summary,
+    SummaryService? summary,
     ModalDeploymentService? deployment,
   }) : repository = repository ?? AppRepository(),
        _capture = capture ?? AudioCaptureService(),
        _uploadPreparation = uploadPreparation ?? UploadPreparationService(),
-       _summary = summary ?? LocalSummaryService(),
+       _summary = summary ?? SummaryService(),
        _deployment = deployment ?? ModalDeploymentService();
 
   final AppRepository repository;
   final AudioCaptureService _capture;
   final UploadPreparationService _uploadPreparation;
-  final LocalSummaryService _summary;
+  final SummaryService _summary;
   final ModalDeploymentService _deployment;
   final _uuid = const Uuid();
   final Set<String> _polling = {};
@@ -473,7 +473,7 @@ class AppController extends ChangeNotifier {
       await _replaceMeeting(meeting.copyWith(summary: summary));
       notice = null;
     } catch (error) {
-      notice = 'Local summary failed: $error';
+      notice = 'Summary failed: $error';
     } finally {
       isSummarizing = false;
       notifyListeners();

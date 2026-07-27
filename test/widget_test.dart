@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lorraine/app_controller.dart';
 import 'package:lorraine/main.dart';
@@ -61,6 +61,58 @@ void main() {
 
     final migrated = AppSettings.fromJson({'match_threshold': 0.72});
     expect(migrated.matchThreshold, 0.75);
+  });
+
+  testWidgets('settings page switches summarization provider and saves it', (
+    tester,
+  ) async {
+    // testWidgets runs in a fake-async zone where real file I/O never
+    // completes, so this repository keeps settings in memory instead.
+    final repository = _InMemoryRepository();
+    final controller = AppController(repository: repository);
+
+    // The settings list is taller than the default test viewport.
+    tester.view.physicalSize = const Size(1400, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(LorraineApp(controller: controller));
+    await tester.tap(find.text('Settings'));
+    await tester.pumpAndSettle();
+
+    // Ollama is the default and hides the API key field.
+    expect(find.text('Ollama (on this Mac)'), findsOneWidget);
+    expect(find.widgetWithText(TextField, 'API key'), findsOneWidget);
+
+    await tester.tap(find.text('Ollama (on this Mac)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Anthropic').last);
+    await tester.pumpAndSettle();
+
+    // Anthropic's defaults populate, and its key field appears.
+    expect(
+      tester
+          .widget<TextField>(find.widgetWithText(TextField, 'Base URL'))
+          .controller!
+          .text,
+      'https://api.anthropic.com/v1',
+    );
+    expect(find.widgetWithText(TextField, 'API key'), findsNWidgets(2));
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'API key').last,
+      'sk-ant-typed',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+
+    // Saved settings carry the new provider, and the untouched Ollama entry
+    // survived the switch.
+    final saved = repository.settings;
+    expect(saved.summaryProvider, SummaryProvider.anthropic);
+    expect(saved.summaryConfig.apiKey, 'sk-ant-typed');
+    expect(saved.summaryConfig.model, 'claude-opus-4-8');
+    expect(saved.configFor(SummaryProvider.ollama).model, 'gemma3:4b');
   });
 
   test('imports meetings and recordings from the old macOS sandbox', () async {
@@ -490,7 +542,7 @@ class _FakeAudioCaptureService extends AudioCaptureService {
   Future<String> stop() async => '/tmp/active-recording.m4a';
 }
 
-class _PendingSummaryService extends LocalSummaryService {
+class _PendingSummaryService extends SummaryService {
   final _completer = Completer<String>();
 
   void complete(String value) => _completer.complete(value);
@@ -499,14 +551,23 @@ class _PendingSummaryService extends LocalSummaryService {
   Future<String> summarize(
     Meeting meeting,
     AppSettings settings, {
-    ValueChanged<LocalSummaryProgress>? onProgress,
+    ValueChanged<SummaryProgress>? onProgress,
   }) {
     onProgress?.call(
-      const LocalSummaryProgress(
+      const SummaryProgress(
         message: 'Downloading gemma3:4b…',
         progress: 0.5,
       ),
     );
     return _completer.future;
   }
+}
+
+/// An [AppRepository] with no disk access, for widget tests.
+class _InMemoryRepository extends AppRepository {
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<void> save() async {}
 }

@@ -369,13 +369,122 @@ List<double> _centroid(List<List<double>> samples) {
   return _normalize(sum);
 }
 
+/// Backends that can generate a meeting summary.
+///
+/// OpenRouter speaks the OpenAI chat-completions dialect, so it shares that
+/// transport and only differs in defaults and attribution headers. Anthropic
+/// does not, so it has its own request shape.
+enum SummaryProvider { ollama, openai, openaiCompatible, anthropic, openRouter }
+
+extension SummaryProviderInfo on SummaryProvider {
+  String get label => switch (this) {
+    SummaryProvider.ollama => 'Ollama (on this Mac)',
+    SummaryProvider.openai => 'OpenAI',
+    SummaryProvider.openaiCompatible => 'OpenAI-compatible endpoint',
+    SummaryProvider.anthropic => 'Anthropic',
+    SummaryProvider.openRouter => 'OpenRouter',
+  };
+
+  String get description => switch (this) {
+    SummaryProvider.ollama =>
+      'Transcript text never leaves this computer. Missing models are '
+          'downloaded automatically.',
+    SummaryProvider.openai => 'Sends the transcript to the OpenAI API.',
+    SummaryProvider.openaiCompatible =>
+      'Any server that implements /chat/completions — LM Studio, vLLM, '
+          'llama.cpp, Together, Groq, and similar.',
+    SummaryProvider.anthropic => 'Sends the transcript to the Anthropic API.',
+    SummaryProvider.openRouter =>
+      'Sends the transcript to OpenRouter, which forwards it to the chosen '
+          'upstream model.',
+  };
+
+  /// Whether the transcript stays on this computer.
+  bool get isLocal => this == SummaryProvider.ollama;
+
+  /// Whether a missing key should block a summary attempt.
+  bool get requiresApiKey => switch (this) {
+    SummaryProvider.ollama || SummaryProvider.openaiCompatible => false,
+    _ => true,
+  };
+
+  SummaryProviderConfig get defaults => switch (this) {
+    SummaryProvider.ollama => const SummaryProviderConfig(
+      baseUrl: 'http://localhost:11434',
+      model: 'gemma3:4b',
+    ),
+    SummaryProvider.openai => const SummaryProviderConfig(
+      baseUrl: 'https://api.openai.com/v1',
+      model: 'gpt-4o-mini',
+    ),
+    SummaryProvider.openaiCompatible => const SummaryProviderConfig(
+      baseUrl: 'http://localhost:1234/v1',
+      model: '',
+    ),
+    SummaryProvider.anthropic => const SummaryProviderConfig(
+      baseUrl: 'https://api.anthropic.com/v1',
+      model: 'claude-opus-4-8',
+    ),
+    SummaryProvider.openRouter => const SummaryProviderConfig(
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'anthropic/claude-opus-4-8',
+    ),
+  };
+
+  static SummaryProvider parse(String? name) {
+    for (final provider in SummaryProvider.values) {
+      if (provider.name == name) return provider;
+    }
+    return SummaryProvider.ollama;
+  }
+}
+
+/// Per-provider endpoint settings. Each provider keeps its own entry so that
+/// switching providers does not discard the other providers' keys and models.
+class SummaryProviderConfig {
+  const SummaryProviderConfig({
+    required this.baseUrl,
+    required this.model,
+    this.apiKey = '',
+  });
+
+  final String baseUrl;
+  final String model;
+  final String apiKey;
+
+  SummaryProviderConfig copyWith({
+    String? baseUrl,
+    String? model,
+    String? apiKey,
+  }) => SummaryProviderConfig(
+    baseUrl: baseUrl ?? this.baseUrl,
+    model: model ?? this.model,
+    apiKey: apiKey ?? this.apiKey,
+  );
+
+  factory SummaryProviderConfig.fromJson(
+    Map<String, dynamic> json,
+    SummaryProviderConfig fallback,
+  ) => SummaryProviderConfig(
+    baseUrl: json['base_url'] as String? ?? fallback.baseUrl,
+    model: json['model'] as String? ?? fallback.model,
+    apiKey: json['api_key'] as String? ?? fallback.apiKey,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'base_url': baseUrl,
+    'model': model,
+    'api_key': apiKey,
+  };
+}
+
 class AppSettings {
   const AppSettings({
     this.modalBaseUrl = '',
     this.apiKey = '',
     this.autoDeployModal = true,
-    this.ollamaUrl = 'http://localhost:11434',
-    this.ollamaModel = 'gemma3:4b',
+    this.summaryProvider = SummaryProvider.ollama,
+    this.summaryProviders = const {},
     this.matchThreshold = 0.75,
     this.enrichedMatchThreshold = 0.60,
     this.matchMargin = 0.25,
@@ -384,20 +493,26 @@ class AppSettings {
   final String modalBaseUrl;
   final String apiKey;
   final bool autoDeployModal;
-  final String ollamaUrl;
-  final String ollamaModel;
+  final SummaryProvider summaryProvider;
+  final Map<SummaryProvider, SummaryProviderConfig> summaryProviders;
   final double matchThreshold;
   final double enrichedMatchThreshold;
   final double matchMargin;
 
   bool get modalConfigured => modalBaseUrl.trim().isNotEmpty;
 
+  /// Stored settings for [provider], falling back to its documented defaults.
+  SummaryProviderConfig configFor(SummaryProvider provider) =>
+      summaryProviders[provider] ?? provider.defaults;
+
+  SummaryProviderConfig get summaryConfig => configFor(summaryProvider);
+
   AppSettings copyWith({
     String? modalBaseUrl,
     String? apiKey,
     bool? autoDeployModal,
-    String? ollamaUrl,
-    String? ollamaModel,
+    SummaryProvider? summaryProvider,
+    Map<SummaryProvider, SummaryProviderConfig>? summaryProviders,
     double? matchThreshold,
     double? enrichedMatchThreshold,
     double? matchMargin,
@@ -405,8 +520,8 @@ class AppSettings {
     modalBaseUrl: modalBaseUrl ?? this.modalBaseUrl,
     apiKey: apiKey ?? this.apiKey,
     autoDeployModal: autoDeployModal ?? this.autoDeployModal,
-    ollamaUrl: ollamaUrl ?? this.ollamaUrl,
-    ollamaModel: ollamaModel ?? this.ollamaModel,
+    summaryProvider: summaryProvider ?? this.summaryProvider,
+    summaryProviders: summaryProviders ?? this.summaryProviders,
     matchThreshold: matchThreshold ?? this.matchThreshold,
     enrichedMatchThreshold:
         enrichedMatchThreshold ?? this.enrichedMatchThreshold,
@@ -425,8 +540,10 @@ class AppSettings {
       modalBaseUrl: json['modal_base_url'] as String? ?? '',
       apiKey: json['api_key'] as String? ?? '',
       autoDeployModal: json['auto_deploy_modal'] as bool? ?? true,
-      ollamaUrl: json['ollama_url'] as String? ?? 'http://localhost:11434',
-      ollamaModel: json['ollama_model'] as String? ?? 'gemma3:4b',
+      summaryProvider: SummaryProviderInfo.parse(
+        json['summary_provider'] as String?,
+      ),
+      summaryProviders: _providersFromJson(json),
       matchThreshold: migrateOldDefault ? 0.75 : storedThreshold ?? 0.75,
       enrichedMatchThreshold:
           (json['enriched_match_threshold'] as num?)?.toDouble() ?? 0.60,
@@ -434,12 +551,42 @@ class AppSettings {
     );
   }
 
+  /// Reads the per-provider map, promoting pre-provider `ollama_*` settings
+  /// into the Ollama entry so existing installs keep their local model.
+  static Map<SummaryProvider, SummaryProviderConfig> _providersFromJson(
+    Map<String, dynamic> json,
+  ) {
+    final stored = json['summary_providers'] as Map<String, dynamic>?;
+    final result = <SummaryProvider, SummaryProviderConfig>{};
+    for (final provider in SummaryProvider.values) {
+      final entry = stored?[provider.name] as Map<String, dynamic>?;
+      if (entry != null) {
+        result[provider] = SummaryProviderConfig.fromJson(
+          entry,
+          provider.defaults,
+        );
+      }
+    }
+    if (!result.containsKey(SummaryProvider.ollama)) {
+      final legacyUrl = json['ollama_url'] as String?;
+      final legacyModel = json['ollama_model'] as String?;
+      if (legacyUrl != null || legacyModel != null) {
+        result[SummaryProvider.ollama] = SummaryProvider.ollama.defaults
+            .copyWith(baseUrl: legacyUrl, model: legacyModel);
+      }
+    }
+    return result;
+  }
+
   Map<String, dynamic> toJson() => {
     'modal_base_url': modalBaseUrl,
     'api_key': apiKey,
     'auto_deploy_modal': autoDeployModal,
-    'ollama_url': ollamaUrl,
-    'ollama_model': ollamaModel,
+    'summary_provider': summaryProvider.name,
+    'summary_providers': {
+      for (final entry in summaryProviders.entries)
+        entry.key.name: entry.value.toJson(),
+    },
     'match_threshold': matchThreshold,
     'enriched_match_threshold': enrichedMatchThreshold,
     'match_margin': matchMargin,
