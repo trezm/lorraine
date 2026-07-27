@@ -393,34 +393,87 @@ class ModalClient {
   }
 }
 
-class LocalSummaryService {
+class SummaryService {
+  static const _systemPrompt =
+      'Summarize this meeting transcript. Return concise Markdown with these '
+      'exact sections: Summary, Decisions, Action items, Open questions. '
+      'Preserve names as shown and do not invent facts. If a section has no '
+      'items, say "None recorded".';
+
+  /// Anthropic requires an explicit cap; the OpenAI dialect and Ollama use
+  /// their own server-side defaults when it is omitted.
+  static const _maxTokens = 16000;
+
   Future<String> summarize(
     Meeting meeting,
     AppSettings settings, {
-    ValueChanged<LocalSummaryProgress>? onProgress,
+    ValueChanged<SummaryProgress>? onProgress,
   }) async {
+    final provider = settings.summaryProvider;
+    final config = settings.summaryConfig;
+    final model = config.model.trim();
+    if (model.isEmpty) {
+      throw const SummaryConfigurationException(
+        'No summarization model is set. Choose one in Settings.',
+      );
+    }
+    if (provider.requiresApiKey && config.apiKey.trim().isEmpty) {
+      throw SummaryConfigurationException(
+        '${provider.label} needs an API key. Add one in Settings.',
+      );
+    }
+
     final transcript = meeting.segments
         .map((segment) => '[${segment.speakerId}] ${segment.text}')
         .join('\n');
     final limited = transcript.length > 100000
         ? transcript.substring(0, 100000)
         : transcript;
-    final prompt =
-        '''Summarize this meeting transcript. Return concise Markdown with these exact sections: Summary, Decisions, Action items, Open questions. Preserve names as shown and do not invent facts. If a section has no items, say "None recorded".\n\n$limited''';
-    final base = settings.ollamaUrl.replaceFirst(RegExp(r'/+$'), '');
-    await _ensureModel(base, settings.ollamaModel, onProgress: onProgress);
-    onProgress?.call(
-      LocalSummaryProgress(
-        message: 'Generating summary with ${settings.ollamaModel}…',
+    final base = config.baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
+
+    return switch (provider) {
+      SummaryProvider.ollama => _summarizeWithOllama(
+        base,
+        model,
+        limited,
+        onProgress: onProgress,
       ),
-    );
+      SummaryProvider.anthropic => _summarizeWithAnthropic(
+        base,
+        model,
+        config.apiKey.trim(),
+        limited,
+        onProgress: onProgress,
+      ),
+      SummaryProvider.openai ||
+      SummaryProvider.openaiCompatible ||
+      SummaryProvider.openRouter => _summarizeWithOpenAi(
+        provider,
+        base,
+        model,
+        config.apiKey.trim(),
+        limited,
+        onProgress: onProgress,
+      ),
+    };
+  }
+
+  Future<String> _summarizeWithOllama(
+    String base,
+    String model,
+    String transcript, {
+    ValueChanged<SummaryProgress>? onProgress,
+  }) async {
+    await _ensureModel(base, model, onProgress: onProgress);
+    onProgress?.call(SummaryProgress(message: 'Generating summary with $model…'));
     final response = await http
         .post(
           Uri.parse('$base/api/generate'),
           headers: {'Content-Type': 'application/json'},
           body: jsonEncode({
-            'model': settings.ollamaModel,
-            'prompt': prompt,
+            'model': model,
+            'system': _systemPrompt,
+            'prompt': transcript,
             'stream': false,
           }),
         )
@@ -435,13 +488,126 @@ class LocalSummaryService {
         '';
   }
 
+  /// OpenAI, OpenRouter, and any other server implementing
+  /// `POST /chat/completions`.
+  Future<String> _summarizeWithOpenAi(
+    SummaryProvider provider,
+    String base,
+    String model,
+    String apiKey,
+    String transcript, {
+    ValueChanged<SummaryProgress>? onProgress,
+  }) async {
+    onProgress?.call(
+      SummaryProgress(message: 'Generating summary with $model…'),
+    );
+    final response = await http
+        .post(
+          Uri.parse('$base/chat/completions'),
+          headers: {
+            'Content-Type': 'application/json',
+            if (apiKey.isNotEmpty) 'Authorization': 'Bearer $apiKey',
+            // OpenRouter names the calling app on its activity page.
+            if (provider == SummaryProvider.openRouter)
+              'X-Title': 'Lorraine',
+          },
+          body: jsonEncode({
+            'model': model,
+            'messages': [
+              {'role': 'system', 'content': _systemPrompt},
+              {'role': 'user', 'content': transcript},
+            ],
+            'stream': false,
+          }),
+        )
+        .timeout(const Duration(minutes: 5));
+    final body = _decodeSummaryResponse(provider.label, response);
+    final choices = body['choices'] as List<dynamic>? ?? const [];
+    if (choices.isEmpty) return '';
+    final message =
+        (choices.first as Map<String, dynamic>)['message']
+            as Map<String, dynamic>?;
+    return message?['content'] as String? ?? '';
+  }
+
+  /// Anthropic's Messages API, which does not follow the OpenAI dialect:
+  /// `x-api-key` instead of bearer auth, a top-level `system` string, and a
+  /// content-block array in the response.
+  Future<String> _summarizeWithAnthropic(
+    String base,
+    String model,
+    String apiKey,
+    String transcript, {
+    ValueChanged<SummaryProgress>? onProgress,
+  }) async {
+    onProgress?.call(
+      SummaryProgress(message: 'Generating summary with $model…'),
+    );
+    final response = await http
+        .post(
+          Uri.parse('$base/messages'),
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': apiKey,
+            'anthropic-version': '2023-06-01',
+          },
+          body: jsonEncode({
+            'model': model,
+            'max_tokens': _maxTokens,
+            'system': _systemPrompt,
+            'messages': [
+              {'role': 'user', 'content': transcript},
+            ],
+          }),
+        )
+        .timeout(const Duration(minutes: 5));
+    final body = _decodeSummaryResponse('Anthropic', response);
+    if (body['stop_reason'] == 'refusal') {
+      throw const HttpException(
+        'Anthropic declined to summarize this transcript.',
+      );
+    }
+    return (body['content'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .where((block) => block['type'] == 'text')
+        .map((block) => block['text'] as String? ?? '')
+        .join();
+  }
+
+  /// Both cloud dialects report failures as `{"error": {"message": ...}}`.
+  Map<String, dynamic> _decodeSummaryResponse(
+    String label,
+    http.Response response,
+  ) {
+    Map<String, dynamic>? body;
+    try {
+      body = jsonDecode(response.body) as Map<String, dynamic>;
+    } on FormatException {
+      body = null;
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      final error = body?['error'];
+      final detail = error is Map<String, dynamic>
+          ? error['message']?.toString()
+          : error?.toString();
+      throw HttpException(
+        '$label returned ${response.statusCode}: '
+        '${detail ?? response.body}',
+      );
+    }
+    if (body == null) {
+      throw HttpException('$label returned an unreadable response.');
+    }
+    return body;
+  }
+
   Future<void> _ensureModel(
     String base,
     String model, {
-    ValueChanged<LocalSummaryProgress>? onProgress,
+    ValueChanged<SummaryProgress>? onProgress,
   }) async {
     onProgress?.call(
-      LocalSummaryProgress(message: 'Checking for local model $model…'),
+      SummaryProgress(message: 'Checking for local model $model…'),
     );
     final show = await http
         .post(
@@ -459,7 +625,7 @@ class LocalSummaryService {
     }
 
     onProgress?.call(
-      LocalSummaryProgress(message: 'Downloading $model…', progress: 0),
+      SummaryProgress(message: 'Downloading $model…', progress: 0),
     );
     final client = http.Client();
     try {
@@ -496,7 +662,7 @@ class LocalSummaryService {
             ? (downloaded / total).clamp(0.0, 1.0)
             : null;
         onProgress?.call(
-          LocalSummaryProgress(
+          SummaryProgress(
             message: status == 'success' ? '$model is ready.' : status,
             progress: status == 'success' ? 1 : progress,
           ),
@@ -523,9 +689,18 @@ class LocalSummaryService {
   }
 }
 
-class LocalSummaryProgress {
-  const LocalSummaryProgress({required this.message, this.progress});
+class SummaryProgress {
+  const SummaryProgress({required this.message, this.progress});
 
   final String message;
   final double? progress;
+}
+
+/// Raised before any request when the chosen provider is missing a model or
+/// key, so the user is pointed at Settings instead of a transport error.
+class SummaryConfigurationException implements Exception {
+  const SummaryConfigurationException(this.message);
+  final String message;
+  @override
+  String toString() => message;
 }

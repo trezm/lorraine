@@ -313,8 +313,10 @@ class MeetingPage extends StatelessWidget {
                   : const Icon(Icons.auto_awesome),
               label: Text(
                 controller.isSummarizing
-                    ? 'Preparing local summary…'
-                    : 'Summarize locally',
+                    ? 'Preparing summary…'
+                    : controller.settings.summaryProvider.isLocal
+                    ? 'Summarize locally'
+                    : 'Summarize',
               ),
             ),
           ],
@@ -580,11 +582,36 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
+/// Editable text fields for one summarization provider. One set is kept per
+/// provider so switching the dropdown never discards another provider's key.
+class _ProviderFields {
+  _ProviderFields(SummaryProviderConfig config)
+    : baseUrl = TextEditingController(text: config.baseUrl),
+      model = TextEditingController(text: config.model),
+      apiKey = TextEditingController(text: config.apiKey);
+
+  final TextEditingController baseUrl;
+  final TextEditingController model;
+  final TextEditingController apiKey;
+
+  SummaryProviderConfig toConfig() => SummaryProviderConfig(
+    baseUrl: baseUrl.text.trim(),
+    model: model.text.trim(),
+    apiKey: apiKey.text.trim(),
+  );
+
+  void dispose() {
+    baseUrl.dispose();
+    model.dispose();
+    apiKey.dispose();
+  }
+}
+
 class _SettingsPageState extends State<SettingsPage> {
   late final TextEditingController modal;
   late final TextEditingController apiKey;
-  late final TextEditingController ollama;
-  late final TextEditingController model;
+  late final Map<SummaryProvider, _ProviderFields> summaryFields;
+  late SummaryProvider summaryProvider;
   late double threshold;
   late double enrichedThreshold;
   late double matchMargin;
@@ -596,8 +623,11 @@ class _SettingsPageState extends State<SettingsPage> {
     final settings = widget.controller.settings;
     modal = TextEditingController(text: settings.modalBaseUrl);
     apiKey = TextEditingController(text: settings.apiKey);
-    ollama = TextEditingController(text: settings.ollamaUrl);
-    model = TextEditingController(text: settings.ollamaModel);
+    summaryProvider = settings.summaryProvider;
+    summaryFields = {
+      for (final provider in SummaryProvider.values)
+        provider: _ProviderFields(settings.configFor(provider)),
+    };
     threshold = settings.matchThreshold;
     enrichedThreshold = settings.enrichedMatchThreshold;
     matchMargin = settings.matchMargin;
@@ -608,8 +638,9 @@ class _SettingsPageState extends State<SettingsPage> {
   void dispose() {
     modal.dispose();
     apiKey.dispose();
-    ollama.dispose();
-    model.dispose();
+    for (final fields in summaryFields.values) {
+      fields.dispose();
+    }
     super.dispose();
   }
 
@@ -621,7 +652,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
     return _Page(
       title: 'Settings',
-      subtitle: 'Connect transcription and local summarization.',
+      subtitle: 'Connect transcription and summarization.',
       child: ListView(
         padding: const EdgeInsets.fromLTRB(32, 8, 32, 100),
         children: [
@@ -719,22 +750,79 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 18),
           _SettingsCard(
-            title: 'Local summary',
-            subtitle:
-                'Uses Ollama on this computer; transcript text never leaves the device.',
+            title: 'Summarization',
+            subtitle: 'Choose which model writes meeting summaries.',
             children: [
-              TextField(
-                controller: ollama,
-                decoration: const InputDecoration(labelText: 'Ollama URL'),
+              DropdownButtonFormField<SummaryProvider>(
+                initialValue: summaryProvider,
+                decoration: const InputDecoration(labelText: 'Provider'),
+                items: [
+                  for (final provider in SummaryProvider.values)
+                    DropdownMenuItem(
+                      value: provider,
+                      child: Text(provider.label),
+                    ),
+                ],
+                onChanged: (value) {
+                  if (value != null) setState(() => summaryProvider = value);
+                },
+              ),
+              const SizedBox(height: 10),
+              Text(
+                summaryProvider.description,
+                style: Theme.of(context).textTheme.bodySmall,
               ),
               const SizedBox(height: 14),
               TextField(
-                controller: model,
-                decoration: const InputDecoration(
-                  labelText: 'Model',
-                  hintText: 'gemma3:4b',
+                controller: summaryFields[summaryProvider]!.baseUrl,
+                decoration: InputDecoration(
+                  labelText: summaryProvider == SummaryProvider.ollama
+                      ? 'Ollama URL'
+                      : 'Base URL',
+                  hintText: summaryProvider.defaults.baseUrl,
                 ),
               ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: summaryFields[summaryProvider]!.model,
+                decoration: InputDecoration(
+                  labelText: 'Model',
+                  hintText: summaryProvider.defaults.model.isEmpty
+                      ? 'The model name your server expects'
+                      : summaryProvider.defaults.model,
+                ),
+              ),
+              if (!summaryProvider.isLocal) ...[
+                const SizedBox(height: 14),
+                TextField(
+                  controller: summaryFields[summaryProvider]!.apiKey,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    labelText: 'API key',
+                    helperText: summaryProvider.requiresApiKey
+                        ? 'Required. Stored unencrypted in the app support folder.'
+                        : 'Optional. Leave empty for servers without authentication.',
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Icon(
+                      Icons.cloud_upload_outlined,
+                      size: 18,
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Transcript text leaves this computer with every '
+                        'summary request to ${summaryProvider.label}.',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 18),
@@ -757,8 +845,11 @@ class _SettingsPageState extends State<SettingsPage> {
                           modalBaseUrl: modal.text.trim(),
                           apiKey: apiKey.text,
                           autoDeployModal: autoDeployModal,
-                          ollamaUrl: ollama.text.trim(),
-                          ollamaModel: model.text.trim(),
+                          summaryProvider: summaryProvider,
+                          summaryProviders: {
+                            for (final entry in summaryFields.entries)
+                              entry.key: entry.value.toConfig(),
+                          },
                           matchThreshold: threshold,
                           enrichedMatchThreshold: enrichedThreshold,
                           matchMargin: matchMargin,
