@@ -72,12 +72,16 @@ void main() {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     addTearDown(() => server.close(force: true));
     final requests = <String>[];
+    String? generatePrompt;
     server.listen((request) async {
       requests.add(request.uri.path);
+      final body = await utf8.decoder.bind(request).join();
       request.response.headers.contentType = ContentType.json;
       if (request.uri.path == '/api/show') {
         request.response.write(jsonEncode({'details': {}}));
       } else if (request.uri.path == '/api/generate') {
+        generatePrompt =
+            (jsonDecode(body) as Map<String, dynamic>)['prompt'] as String?;
         request.response.write(jsonEncode({'response': 'Already installed'}));
       }
       await request.response.close();
@@ -108,10 +112,14 @@ void main() {
           ),
         },
       ),
+      speakerNames: const {'SPEAKER_00': 'Pete'},
     );
 
     expect(summary, 'Already installed');
     expect(requests, ['/api/show', '/api/generate']);
+    expect(generatePrompt, contains('SPEAKER_00 = Pete'));
+    expect(generatePrompt, contains('[Pete] Hello.'));
+    expect(generatePrompt, isNot(contains('[SPEAKER_00] Hello.')));
   });
 
   test('summarizes through an OpenAI-compatible endpoint', () async {
@@ -123,7 +131,10 @@ void main() {
       return {
         'choices': [
           {
-            'message': {'role': 'assistant', 'content': '# Summary\nFrom OpenAI'},
+            'message': {
+              'role': 'assistant',
+              'content': '# Summary\nFrom OpenAI',
+            },
           },
         ],
       };
@@ -141,6 +152,7 @@ void main() {
           ),
         },
       ),
+      speakerNames: const {'SPEAKER_00': 'Pete'},
     );
 
     expect(summary, '# Summary\nFrom OpenAI');
@@ -148,7 +160,9 @@ void main() {
     expect(body['model'], 'gpt-4o-mini');
     final messages = body['messages'] as List<dynamic>;
     expect(messages.first['role'], 'system');
-    expect(messages.last['content'], contains('We made a decision.'));
+    expect(messages.first['content'], contains('speaker identity mapping'));
+    expect(messages.last['content'], contains('SPEAKER_00 = Pete'));
+    expect(messages.last['content'], contains('[Pete] We made a decision.'));
   });
 
   test('summarizes through the Anthropic Messages API', () async {

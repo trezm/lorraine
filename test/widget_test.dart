@@ -492,6 +492,18 @@ void main() {
         legacyRoot: Directory('${temporary.path}/legacy'),
       );
       await repository.initialize();
+      repository.profiles.add(
+        SpeakerProfile(
+          id: 'profile-pete',
+          name: 'Pete',
+          email: 'pete@example.com',
+          embeddings: const [
+            [1, 0],
+          ],
+          samplePath: '/tmp/pete.wav',
+          createdAt: DateTime.utc(2026, 7, 24),
+        ),
+      );
       repository.meetings.add(
         Meeting(
           id: 'meeting-summary',
@@ -500,6 +512,14 @@ void main() {
           audioPath: '/tmp/earlier.m4a',
           durationSeconds: 10,
           status: MeetingStatus.ready,
+          speakers: const [
+            MeetingSpeaker(
+              id: 'SPEAKER_00',
+              embedding: [1, 0],
+              profileId: 'profile-pete',
+              identityConfirmed: true,
+            ),
+          ],
           segments: const [
             TranscriptSegment(
               start: 0,
@@ -524,6 +544,7 @@ void main() {
       expect(controller.isRecording, isTrue);
       expect(controller.isSummarizing, isTrue);
       expect(controller.isStoppingRecording, isFalse);
+      expect(summary.speakerNames, {'SPEAKER_00': 'Pete'});
 
       summary.complete('# Summary\nDone');
       await summaryFuture;
@@ -544,6 +565,7 @@ class _FakeAudioCaptureService extends AudioCaptureService {
 
 class _PendingSummaryService extends SummaryService {
   final _completer = Completer<String>();
+  Map<String, String>? speakerNames;
 
   void complete(String value) => _completer.complete(value);
 
@@ -551,13 +573,12 @@ class _PendingSummaryService extends SummaryService {
   Future<String> summarize(
     Meeting meeting,
     AppSettings settings, {
+    Map<String, String> speakerNames = const {},
     ValueChanged<SummaryProgress>? onProgress,
   }) {
+    this.speakerNames = speakerNames;
     onProgress?.call(
-      const SummaryProgress(
-        message: 'Downloading gemma3:4b…',
-        progress: 0.5,
-      ),
+      const SummaryProgress(message: 'Downloading gemma3:4b…', progress: 0.5),
     );
     return _completer.future;
   }

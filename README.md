@@ -64,6 +64,8 @@ Ollama is the only provider Lorraine *treats* as local: selecting anything else 
 
 If you pick a cloud provider, that provider's own retention and training policies then govern your transcript, not this README. Check them before summarizing meetings you would not want retained.
 
+Regardless of provider, the summary request includes the current anonymous-speaker-to-name mapping and labels identified transcript lines with those names. Unidentified speakers retain their anonymous labels.
+
 ### Ollama
 
 Install [Ollama](https://ollama.com), then run:

@@ -459,9 +459,17 @@ class AppController extends ChangeNotifier {
     notice = null;
     notifyListeners();
     try {
+      final speakerNames = <String, String>{};
+      for (final speaker in meeting.speakers) {
+        final profile = profileById(speaker.profileId);
+        if (profile != null && profile.name.trim().isNotEmpty) {
+          speakerNames[speaker.id] = profile.name.trim();
+        }
+      }
       final summary = await _summary.summarize(
         meeting,
         settings,
+        speakerNames: speakerNames,
         onProgress: (update) {
           final progress = update.progress;
           notice = progress == null

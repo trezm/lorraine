@@ -397,8 +397,10 @@ class SummaryService {
   static const _systemPrompt =
       'Summarize this meeting transcript. Return concise Markdown with these '
       'exact sections: Summary, Decisions, Action items, Open questions. '
-      'Preserve names as shown and do not invent facts. If a section has no '
-      'items, say "None recorded".';
+      'Use the authoritative speaker identity mapping whenever attributing '
+      'statements or action items. Preserve unidentified speaker labels as '
+      'shown and do not invent facts. If a section has no items, say '
+      '"None recorded".';
 
   /// Anthropic requires an explicit cap; the OpenAI dialect and Ollama use
   /// their own server-side defaults when it is omitted.
@@ -407,6 +409,7 @@ class SummaryService {
   Future<String> summarize(
     Meeting meeting,
     AppSettings settings, {
+    Map<String, String> speakerNames = const {},
     ValueChanged<SummaryProgress>? onProgress,
   }) async {
     final provider = settings.summaryProvider;
@@ -423,26 +426,46 @@ class SummaryService {
       );
     }
 
+    String displayName(String speakerId) {
+      final identified = speakerNames[speakerId]?.trim();
+      if (identified == null || identified.isEmpty) return speakerId;
+      return identified.replaceAll(RegExp(r'\s+'), ' ');
+    }
+
     final transcript = meeting.segments
-        .map((segment) => '[${segment.speakerId}] ${segment.text}')
+        .map((segment) => '[${displayName(segment.speakerId)}] ${segment.text}')
         .join('\n');
     final limited = transcript.length > 100000
         ? transcript.substring(0, 100000)
         : transcript;
+    final identities =
+        speakerNames.entries
+            .where((entry) => entry.value.trim().isNotEmpty)
+            .map(
+              (entry) =>
+                  '${entry.key} = ${entry.value.trim().replaceAll(RegExp(r'\s+'), ' ')}',
+            )
+            .toList()
+          ..sort();
+    final identityMapping = identities.isEmpty
+        ? 'No speakers have been identified.'
+        : identities.join('\n');
+    final summaryInput =
+        'Speaker identity mapping:\n$identityMapping\n\nTranscript:\n$limited';
     final base = config.baseUrl.trim().replaceFirst(RegExp(r'/+$'), '');
 
     return switch (provider) {
       SummaryProvider.ollama => _summarizeWithOllama(
         base,
         model,
-        limited,
+        summaryInput,
         onProgress: onProgress,
       ),
       SummaryProvider.anthropic => _summarizeWithAnthropic(
         base,
         model,
         config.apiKey.trim(),
-        limited,
+        summaryInput,
         onProgress: onProgress,
       ),
       SummaryProvider.openai ||
@@ -452,7 +475,7 @@ class SummaryService {
         base,
         model,
         config.apiKey.trim(),
-        limited,
+        summaryInput,
         onProgress: onProgress,
       ),
     };
@@ -465,7 +488,9 @@ class SummaryService {
     ValueChanged<SummaryProgress>? onProgress,
   }) async {
     await _ensureModel(base, model, onProgress: onProgress);
-    onProgress?.call(SummaryProgress(message: 'Generating summary with $model…'));
+    onProgress?.call(
+      SummaryProgress(message: 'Generating summary with $model…'),
+    );
     final response = await http
         .post(
           Uri.parse('$base/api/generate'),
@@ -508,8 +533,7 @@ class SummaryService {
             'Content-Type': 'application/json',
             if (apiKey.isNotEmpty) 'Authorization': 'Bearer $apiKey',
             // OpenRouter names the calling app on its activity page.
-            if (provider == SummaryProvider.openRouter)
-              'X-Title': 'Lorraine',
+            if (provider == SummaryProvider.openRouter) 'X-Title': 'Lorraine',
           },
           body: jsonEncode({
             'model': model,
