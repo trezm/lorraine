@@ -1,5 +1,7 @@
 # Lorraine
 
+[![CI](https://github.com/trezm/lorraine/actions/workflows/ci.yml/badge.svg)](https://github.com/trezm/lorraine/actions/workflows/ci.yml)
+
 Lorraine is a local-first Flutter meeting recorder for macOS. It captures the Mac's system audio and microphone into one retained recording, submits a transcription-optimized copy to an authenticated Modal deployment running WhisperX, and stores the returned speaker-labelled transcript locally.
 
 It also tries to recognize the same person across meetings. Every anonymous speaker gets a normalized voice embedding and a short WAV sample; once you identify a voice with a name and email, that embedding is enrolled on a local profile and later meetings are matched against it, so regulars stop coming back as `SPEAKER_00`. See [Recognize the same person across meetings](#recognize-the-same-person-across-meetings).
@@ -136,14 +138,30 @@ Recording and transcribing other people carries obligations Lorraine does not ha
 
 ## Verify
 
+These are the same checks [CI](.github/workflows/ci.yml) runs on every pull
+request, so a clean run here means a green build:
+
 ```sh
-flutter analyze
-flutter test
-python3 -m py_compile backend/modal_app.py
+dart format --output=none --set-exit-if-changed lib test
+flutter analyze --fatal-infos --fatal-warnings
+flutter test --coverage
+
+ruff check backend
+ruff format --check backend
+python3 -m compileall -q backend
+```
+
+`ruff` is configured in [ruff.toml](ruff.toml); install it with
+`python3 -m pip install ruff` or run it via `uvx ruff`.
+
+CI does not build the app, because the desktop targets need platform SDKs. Build
+locally before releasing:
+
+```sh
 flutter build macos
 ```
 
-The last command requires a complete Xcode installation and CocoaPods.
+That command requires a complete Xcode installation and CocoaPods.
 
 ## Project map
 

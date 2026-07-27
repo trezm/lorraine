@@ -465,7 +465,9 @@ class SummaryService {
     ValueChanged<SummaryProgress>? onProgress,
   }) async {
     await _ensureModel(base, model, onProgress: onProgress);
-    onProgress?.call(SummaryProgress(message: 'Generating summary with $model…'));
+    onProgress?.call(
+      SummaryProgress(message: 'Generating summary with $model…'),
+    );
     final response = await http
         .post(
           Uri.parse('$base/api/generate'),
@@ -508,8 +510,7 @@ class SummaryService {
             'Content-Type': 'application/json',
             if (apiKey.isNotEmpty) 'Authorization': 'Bearer $apiKey',
             // OpenRouter names the calling app on its activity page.
-            if (provider == SummaryProvider.openRouter)
-              'X-Title': 'Lorraine',
+            if (provider == SummaryProvider.openRouter) 'X-Title': 'Lorraine',
           },
           body: jsonEncode({
             'model': model,

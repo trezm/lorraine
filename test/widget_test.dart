@@ -554,10 +554,7 @@ class _PendingSummaryService extends SummaryService {
     ValueChanged<SummaryProgress>? onProgress,
   }) {
     onProgress?.call(
-      const SummaryProgress(
-        message: 'Downloading gemma3:4b…',
-        progress: 0.5,
-      ),
+      const SummaryProgress(message: 'Downloading gemma3:4b…', progress: 0.5),
     );
     return _completer.future;
   }
