@@ -291,6 +291,12 @@ class MeetingPage extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          IconButton(
+            onPressed: () => _renameDialog(context, controller, meeting),
+            tooltip: 'Rename meeting',
+            icon: const Icon(Icons.edit_outlined),
+          ),
+          const SizedBox(width: 10),
           if (canTranscribe)
             OutlinedButton.icon(
               onPressed: () => controller.transcribe(meeting.id),
@@ -1188,6 +1194,41 @@ class _StatusIcon extends StatelessWidget {
       child: Icon(icon),
     );
   }
+}
+
+Future<void> _renameDialog(
+  BuildContext context,
+  AppController controller,
+  Meeting meeting,
+) async {
+  final title = TextEditingController(text: meeting.title);
+  final accepted = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Rename meeting'),
+      content: SizedBox(
+        width: 420,
+        child: TextField(
+          controller: title,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Meeting title'),
+          onSubmitted: (_) =>
+              Navigator.pop(context, title.text.trim().isNotEmpty),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, title.text.trim().isNotEmpty),
+          child: const Text('Save'),
+        ),
+      ],
+    ),
+  );
+  if (accepted == true) await controller.renameMeeting(meeting.id, title.text);
 }
 
 Future<void> _identifyDialog(

@@ -127,6 +127,7 @@ class Meeting {
   final List<MeetingSpeaker> speakers;
 
   Meeting copyWith({
+    String? title,
     MeetingStatus? status,
     Object? jobId = _notSet,
     Object? language = _notSet,
@@ -138,7 +139,7 @@ class Meeting {
     List<MeetingSpeaker>? speakers,
   }) => Meeting(
     id: id,
-    title: title,
+    title: title ?? this.title,
     createdAt: createdAt,
     audioPath: audioPath,
     durationSeconds: durationSeconds,
