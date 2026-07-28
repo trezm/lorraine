@@ -184,6 +184,16 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// Renames [meetingId]. The title is local-only metadata that is never
+  /// uploaded, so this is safe at any status. A blank or unchanged title is
+  /// ignored rather than overwriting the existing one.
+  Future<void> renameMeeting(String meetingId, String title) async {
+    final meeting = meetingById(meetingId);
+    final trimmed = title.trim();
+    if (meeting == null || trimmed.isEmpty || trimmed == meeting.title) return;
+    await _replaceMeeting(meeting.copyWith(title: trimmed));
+  }
+
   Future<void> transcribe(String meetingId) async {
     final meeting = meetingById(meetingId);
     if (meeting == null) return;

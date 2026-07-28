@@ -115,6 +115,95 @@ void main() {
     expect(saved.configFor(SummaryProvider.ollama).model, 'gemma3:4b');
   });
 
+  test('renaming a meeting persists and ignores a blank title', () async {
+    final temporary = await Directory.systemTemp.createTemp(
+      'lorraine-rename-test-',
+    );
+    addTearDown(() => temporary.delete(recursive: true));
+    final support = Directory('${temporary.path}/support');
+    final legacy = Directory('${temporary.path}/legacy');
+    final repository = AppRepository(
+      supportDirectory: support,
+      legacyRoot: legacy,
+    );
+    await repository.initialize();
+    repository.meetings.add(
+      Meeting(
+        id: 'meeting-rename',
+        title: 'Meeting Jul 24, 2026',
+        createdAt: DateTime.utc(2026, 7, 24),
+        audioPath: '/tmp/rename.m4a',
+        durationSeconds: 42,
+        status: MeetingStatus.ready,
+        segments: const [
+          TranscriptSegment(
+            start: 0,
+            end: 1,
+            speakerId: 'SPEAKER_00',
+            text: 'Keep me.',
+          ),
+        ],
+      ),
+    );
+    final controller = AppController(repository: repository);
+
+    await controller.renameMeeting('meeting-rename', '  Quarterly review  ');
+    expect(repository.meetings.single.title, 'Quarterly review');
+    // Renaming touches nothing else on the meeting.
+    expect(repository.meetings.single.segments, hasLength(1));
+    expect(repository.meetings.single.status, MeetingStatus.ready);
+
+    await controller.renameMeeting('meeting-rename', '   ');
+    expect(repository.meetings.single.title, 'Quarterly review');
+
+    final reloaded = AppRepository(
+      supportDirectory: support,
+      legacyRoot: legacy,
+    );
+    await reloaded.initialize();
+    expect(reloaded.meetings.single.title, 'Quarterly review');
+  });
+
+  testWidgets('the meeting page renames a meeting from its header', (
+    tester,
+  ) async {
+    final repository = _InMemoryRepository();
+    repository.meetings.add(
+      Meeting(
+        id: 'meeting-rename',
+        title: 'Meeting Jul 24, 2026',
+        createdAt: DateTime.utc(2026, 7, 24),
+        audioPath: '/tmp/rename.m4a',
+        durationSeconds: 42,
+        status: MeetingStatus.recorded,
+      ),
+    );
+    final controller = AppController(repository: repository);
+
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(LorraineApp(controller: controller));
+    await tester.tap(find.text('Meeting Jul 24, 2026'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Rename meeting'));
+    await tester.pumpAndSettle();
+    expect(find.widgetWithText(AlertDialog, 'Rename meeting'), findsOneWidget);
+
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Meeting title'),
+      'Quarterly review',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    expect(repository.meetings.single.title, 'Quarterly review');
+    // The header reflects the new name without leaving the meeting.
+    expect(find.text('Quarterly review'), findsOneWidget);
+  });
+
   test('imports meetings and recordings from the old macOS sandbox', () async {
     final temporary = await Directory.systemTemp.createTemp(
       'lorraine-migration-test-',
