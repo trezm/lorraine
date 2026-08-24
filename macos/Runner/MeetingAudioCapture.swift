@@ -5,12 +5,24 @@ import ScreenCaptureKit
 
 @available(macOS 15.0, *)
 final class MeetingAudioCapture: NSObject, SCStreamOutput {
+  /// RMS level (full scale = 1) a buffer must reach to count as someone
+  /// speaking. Normal speech sits well above this; room tone sits well below.
+  private static let speechRMSThreshold: Float = 0.02
+
   private let systemQueue = DispatchQueue(label: "com.lorraine.capture.system")
   private let microphoneQueue = DispatchQueue(label: "com.lorraine.capture.microphone")
   private var stream: SCStream?
   private var systemWriter: AudioTrackWriter?
   private var microphoneWriter: AudioTrackWriter?
   private var finalURL: URL?
+  private let activityLock = NSLock()
+  private var lastAudioAt = Date()
+
+  /// Seconds since either track last carried sound above the speech
+  /// threshold. Measured from the start of the recording until then.
+  func secondsSinceAudio() -> Double {
+    activityLock.withLock { Date().timeIntervalSince(lastAudioAt) }
+  }
 
   func start(outputPath: String) async throws {
     guard stream == nil else { throw CaptureError.alreadyRecording }
@@ -43,6 +55,7 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput {
     systemWriter = try AudioTrackWriter(url: systemURL)
     microphoneWriter = try AudioTrackWriter(url: microphoneURL)
     finalURL = outputURL
+    activityLock.withLock { lastAudioAt = Date() }
     self.stream = stream
     try await stream.startCapture()
   }
@@ -69,12 +82,46 @@ final class MeetingAudioCapture: NSObject, SCStreamOutput {
     guard sampleBuffer.isValid, CMSampleBufferDataIsReady(sampleBuffer) else { return }
     switch outputType {
     case .audio:
+      noteActivity(in: sampleBuffer)
       systemWriter?.append(sampleBuffer)
     case .microphone:
+      noteActivity(in: sampleBuffer)
       microphoneWriter?.append(sampleBuffer)
     default:
       break
     }
+  }
+
+  private func noteActivity(in sample: CMSampleBuffer) {
+    guard let format = CMSampleBufferGetFormatDescription(sample),
+          let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
+          asbd.mFormatID == kAudioFormatLinearPCM
+    else { return }
+    let isFloat = (asbd.mFormatFlags & kAudioFormatFlagIsFloat) != 0
+    var energy: Float = 0
+    var count = 0
+    try? sample.withAudioBufferList { bufferList, _ in
+      for buffer in bufferList {
+        guard let data = buffer.mData else { continue }
+        // Every 4th sample is plenty of resolution for a speech gate.
+        if isFloat, asbd.mBitsPerChannel == 32 {
+          let values = data.assumingMemoryBound(to: Float32.self)
+          for index in stride(from: 0, to: Int(buffer.mDataByteSize) / 4, by: 4) {
+            energy += values[index] * values[index]
+            count += 1
+          }
+        } else if !isFloat, asbd.mBitsPerChannel == 16 {
+          let values = data.assumingMemoryBound(to: Int16.self)
+          for index in stride(from: 0, to: Int(buffer.mDataByteSize) / 2, by: 4) {
+            let value = Float(values[index]) / Float(Int16.max)
+            energy += value * value
+            count += 1
+          }
+        }
+      }
+    }
+    guard count > 0, (energy / Float(count)).squareRoot() >= Self.speechRMSThreshold else { return }
+    activityLock.withLock { lastAudioAt = Date() }
   }
 
   private static func mix(inputs: [URL], output: URL) async throws {

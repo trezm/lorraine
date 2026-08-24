@@ -642,14 +642,180 @@ void main() {
       await controller.stopRecording();
     },
   );
+
+  test('recording reminder settings default on and persist', () {
+    const settings = AppSettings();
+    expect(settings.longMeetingAlertEnabled, isTrue);
+    expect(settings.longMeetingAlertMinutes, 60);
+    expect(settings.silenceAlertEnabled, isTrue);
+    expect(settings.silenceAlertMinutes, 5);
+
+    final restored = AppSettings.fromJson(
+      settings
+          .copyWith(
+            longMeetingAlertEnabled: false,
+            longMeetingAlertMinutes: 90,
+            silenceAlertMinutes: 8,
+          )
+          .toJson(),
+    );
+    expect(restored.longMeetingAlertEnabled, isFalse);
+    expect(restored.longMeetingAlertMinutes, 90);
+    expect(restored.silenceAlertEnabled, isTrue);
+    expect(restored.silenceAlertMinutes, 8);
+
+    // State files from before this feature keep the defaults.
+    final legacy = AppSettings.fromJson({'modal_base_url': 'https://x'});
+    expect(legacy.longMeetingAlertEnabled, isTrue);
+    expect(legacy.silenceAlertMinutes, 5);
+  });
+
+  test('long recordings check in, snooze, and auto-stop unanswered', () async {
+    final repository = _InMemoryRepository();
+    final capture = _FakeAudioCaptureService();
+    final clock = _FakeClock();
+    final controller = AppController(
+      repository: repository,
+      capture: capture,
+      now: () => clock.value,
+    )..captureSupported = true;
+    await controller.startRecording('Marathon');
+
+    clock.advance(const Duration(minutes: 59));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNull);
+
+    clock.advance(const Duration(minutes: 1));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert?.reason, RecordingAlertReason.longMeeting);
+    expect(controller.recordingAlert?.secondsRemaining, 300);
+
+    // "Keep recording" snoozes the check-in for another full interval.
+    controller.dismissRecordingAlert();
+    expect(controller.recordingAlert, isNull);
+    clock.advance(const Duration(minutes: 59));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNull);
+    clock.advance(const Duration(minutes: 1));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert?.reason, RecordingAlertReason.longMeeting);
+
+    // Nobody answers: the countdown lapses and the recording saves itself.
+    clock.advance(const Duration(minutes: 5));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.isRecording, isFalse);
+    expect(controller.recordingAlert, isNull);
+    expect(controller.notice, contains('check-in went unanswered'));
+    expect(repository.meetings.single.title, 'Marathon');
+    expect(repository.meetings.single.durationSeconds, 125 * 60);
+  });
+
+  test('silence prompts, withdraws on speech, and auto-stops', () async {
+    final repository = _InMemoryRepository();
+    final capture = _FakeAudioCaptureService();
+    final clock = _FakeClock();
+    final controller = AppController(
+      repository: repository,
+      capture: capture,
+      now: () => clock.value,
+    )..captureSupported = true;
+    await controller.startRecording('Standup');
+
+    clock.advance(const Duration(minutes: 10));
+    capture.silence = 4 * 60;
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNull);
+
+    capture.silence = 5 * 60;
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert?.reason, RecordingAlertReason.silence);
+
+    // Someone speaks again: the prompt withdraws itself, no answer needed.
+    capture.silence = 3;
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNull);
+
+    // Quiet again; the user asks to keep recording, which buys another
+    // silence interval before the next prompt.
+    clock.advance(const Duration(minutes: 6));
+    capture.silence = 6 * 60;
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert?.reason, RecordingAlertReason.silence);
+    controller.dismissRecordingAlert();
+    clock.advance(const Duration(minutes: 4));
+    capture.silence = 10 * 60;
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNull);
+    clock.advance(const Duration(minutes: 1));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert?.reason, RecordingAlertReason.silence);
+
+    // This time nobody answers, so the recording stops and saves.
+    clock.advance(const Duration(minutes: 5));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.isRecording, isFalse);
+    expect(controller.notice, contains('5 minutes without speech'));
+    expect(repository.meetings.single.title, 'Standup');
+  });
+
+  testWidgets('the recording alert overlay keeps recording on request', (
+    tester,
+  ) async {
+    final repository = _InMemoryRepository();
+    final capture = _FakeAudioCaptureService();
+    final clock = _FakeClock();
+    final controller = AppController(
+      repository: repository,
+      capture: capture,
+      now: () => clock.value,
+    )..captureSupported = true;
+    await controller.startRecording('Overlay test');
+    clock.advance(const Duration(minutes: 60));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNotNull);
+
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(LorraineApp(controller: controller));
+    await tester.pump();
+    expect(find.text('Still meeting?'), findsOneWidget);
+    expect(find.textContaining('running for over 60 minutes'), findsOneWidget);
+    expect(
+      find.textContaining('stops and saves itself in 05:00'),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Keep recording'));
+    await tester.pump();
+    expect(controller.recordingAlert, isNull);
+    expect(controller.isRecording, isTrue);
+    expect(find.text('Still meeting?'), findsNothing);
+
+    await controller.stopRecording();
+  });
 }
 
 class _FakeAudioCaptureService extends AudioCaptureService {
+  /// What [silenceSeconds] reports; tests mutate this to simulate speech
+  /// stopping and resuming.
+  double? silence = 0;
+
   @override
   Future<void> start(String outputPath) async {}
 
   @override
   Future<String> stop() async => '/tmp/active-recording.m4a';
+
+  @override
+  Future<double?> silenceSeconds() async => silence;
+}
+
+class _FakeClock {
+  DateTime value = DateTime.utc(2026, 8, 24, 9);
+
+  void advance(Duration duration) => value = value.add(duration);
 }
 
 class _PendingSummaryService extends SummaryService {
@@ -680,4 +846,7 @@ class _InMemoryRepository extends AppRepository {
 
   @override
   Future<void> save() async {}
+
+  @override
+  String recordingPath(String id) => '/tmp/$id.m4a';
 }
