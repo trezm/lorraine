@@ -94,6 +94,22 @@ class _LorraineShellState extends State<LorraineShell> {
                           }
                         },
                       ),
+                    if (widget.controller.recordingAlert != null)
+                      RecordingAlertOverlay(
+                        alert: widget.controller.recordingAlert!,
+                        settings: widget.controller.settings,
+                        stopping: widget.controller.isStoppingRecording,
+                        onKeep: widget.controller.dismissRecordingAlert,
+                        onStop: () async {
+                          final id = await widget.controller.stopRecording();
+                          if (id != null) {
+                            setState(() {
+                              page = 0;
+                              selectedMeetingId = id;
+                            });
+                          }
+                        },
+                      ),
                   ],
                 ),
               ),
@@ -622,6 +638,10 @@ class _SettingsPageState extends State<SettingsPage> {
   late double enrichedThreshold;
   late double matchMargin;
   late bool autoDeployModal;
+  late bool longMeetingAlertEnabled;
+  late int longMeetingAlertMinutes;
+  late bool silenceAlertEnabled;
+  late int silenceAlertMinutes;
 
   @override
   void initState() {
@@ -638,6 +658,10 @@ class _SettingsPageState extends State<SettingsPage> {
     enrichedThreshold = settings.enrichedMatchThreshold;
     matchMargin = settings.matchMargin;
     autoDeployModal = settings.autoDeployModal;
+    longMeetingAlertEnabled = settings.longMeetingAlertEnabled;
+    longMeetingAlertMinutes = settings.longMeetingAlertMinutes.clamp(30, 180);
+    silenceAlertEnabled = settings.silenceAlertEnabled;
+    silenceAlertMinutes = settings.silenceAlertMinutes.clamp(2, 15);
   }
 
   @override
@@ -756,6 +780,65 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
           const SizedBox(height: 18),
           _SettingsCard(
+            title: 'Recording reminders',
+            subtitle: 'Catch recordings left running after the meeting ends.',
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Ask to stop when the meeting goes quiet'),
+                subtitle: const Text(
+                  'Watches the live audio and offers to stop once nobody has spoken for a while.',
+                ),
+                value: silenceAlertEnabled,
+                onChanged: (value) =>
+                    setState(() => silenceAlertEnabled = value),
+              ),
+              if (silenceAlertEnabled) ...[
+                Text(
+                  'Consider the meeting over after: $silenceAlertMinutes '
+                  '${silenceAlertMinutes == 1 ? 'minute' : 'minutes'} of silence',
+                ),
+                Slider(
+                  value: silenceAlertMinutes.toDouble(),
+                  min: 2,
+                  max: 15,
+                  divisions: 13,
+                  onChanged: (value) =>
+                      setState(() => silenceAlertMinutes = value.round()),
+                ),
+              ],
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Check in during long recordings'),
+                subtitle: const Text(
+                  'Asks whether to keep going after the recording runs long, even if people are still talking.',
+                ),
+                value: longMeetingAlertEnabled,
+                onChanged: (value) =>
+                    setState(() => longMeetingAlertEnabled = value),
+              ),
+              if (longMeetingAlertEnabled) ...[
+                Text('Check in after: $longMeetingAlertMinutes minutes'),
+                Slider(
+                  value: longMeetingAlertMinutes.toDouble(),
+                  min: 30,
+                  max: 180,
+                  divisions: 30,
+                  onChanged: (value) => setState(
+                    () => longMeetingAlertMinutes = (value / 5).round() * 5,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 6),
+              Text(
+                'Each reminder plays a sound and counts down for 5 minutes. '
+                'If nobody answers, the recording stops and saves itself.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ],
+          ),
+          const SizedBox(height: 18),
+          _SettingsCard(
             title: 'Summarization',
             subtitle: 'Choose which model writes meeting summaries.',
             children: [
@@ -859,6 +942,10 @@ class _SettingsPageState extends State<SettingsPage> {
                           matchThreshold: threshold,
                           enrichedMatchThreshold: enrichedThreshold,
                           matchMargin: matchMargin,
+                          longMeetingAlertEnabled: longMeetingAlertEnabled,
+                          longMeetingAlertMinutes: longMeetingAlertMinutes,
+                          silenceAlertEnabled: silenceAlertEnabled,
+                          silenceAlertMinutes: silenceAlertMinutes,
                         ),
                       );
                       if (!context.mounted) return;
@@ -1018,6 +1105,102 @@ class RecordingBar extends StatelessWidget {
       ),
     ),
   );
+}
+
+class RecordingAlertOverlay extends StatelessWidget {
+  const RecordingAlertOverlay({
+    required this.alert,
+    required this.settings,
+    required this.stopping,
+    required this.onKeep,
+    required this.onStop,
+    super.key,
+  });
+
+  final RecordingAlert alert;
+  final AppSettings settings;
+  final bool stopping;
+  final VoidCallback onKeep;
+  final VoidCallback onStop;
+
+  @override
+  Widget build(BuildContext context) {
+    final reason = switch (alert.reason) {
+      RecordingAlertReason.longMeeting =>
+        'This recording has been running for over '
+            '${settings.longMeetingAlertMinutes} minutes.',
+      RecordingAlertReason.silence =>
+        'No one seems to have spoken for the last '
+            '${settings.silenceAlertMinutes} '
+            '${settings.silenceAlertMinutes == 1 ? 'minute' : 'minutes'}.',
+    };
+    return Positioned.fill(
+      child: ColoredBox(
+        color: Colors.black38,
+        child: Center(
+          child: SizedBox(
+            width: 460,
+            child: Card(
+              child: Padding(
+                padding: const EdgeInsets.all(28),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.timer_outlined,
+                          color: Theme.of(context).colorScheme.primary,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          'Still meeting?',
+                          style: Theme.of(context).textTheme.titleLarge
+                              ?.copyWith(fontWeight: FontWeight.w700),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    Text(reason, style: const TextStyle(height: 1.5)),
+                    const SizedBox(height: 8),
+                    Text(
+                      'The recording stops and saves itself in '
+                      '${_duration(alert.secondsRemaining)}.',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                    const SizedBox(height: 22),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: Wrap(
+                        alignment: WrapAlignment.end,
+                        spacing: 12,
+                        runSpacing: 8,
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: stopping ? null : onStop,
+                            icon: const Icon(Icons.stop),
+                            label: const Text('Stop now'),
+                          ),
+                          FilledButton(
+                            onPressed: stopping ? null : onKeep,
+                            child: const Text('Keep recording'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _Page extends StatelessWidget {

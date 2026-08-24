@@ -489,6 +489,10 @@ class AppSettings {
     this.matchThreshold = 0.75,
     this.enrichedMatchThreshold = 0.60,
     this.matchMargin = 0.25,
+    this.longMeetingAlertEnabled = true,
+    this.longMeetingAlertMinutes = 60,
+    this.silenceAlertEnabled = true,
+    this.silenceAlertMinutes = 5,
   });
 
   final String modalBaseUrl;
@@ -499,6 +503,10 @@ class AppSettings {
   final double matchThreshold;
   final double enrichedMatchThreshold;
   final double matchMargin;
+  final bool longMeetingAlertEnabled;
+  final int longMeetingAlertMinutes;
+  final bool silenceAlertEnabled;
+  final int silenceAlertMinutes;
 
   bool get modalConfigured => modalBaseUrl.trim().isNotEmpty;
 
@@ -517,6 +525,10 @@ class AppSettings {
     double? matchThreshold,
     double? enrichedMatchThreshold,
     double? matchMargin,
+    bool? longMeetingAlertEnabled,
+    int? longMeetingAlertMinutes,
+    bool? silenceAlertEnabled,
+    int? silenceAlertMinutes,
   }) => AppSettings(
     modalBaseUrl: modalBaseUrl ?? this.modalBaseUrl,
     apiKey: apiKey ?? this.apiKey,
@@ -527,6 +539,12 @@ class AppSettings {
     enrichedMatchThreshold:
         enrichedMatchThreshold ?? this.enrichedMatchThreshold,
     matchMargin: matchMargin ?? this.matchMargin,
+    longMeetingAlertEnabled:
+        longMeetingAlertEnabled ?? this.longMeetingAlertEnabled,
+    longMeetingAlertMinutes:
+        longMeetingAlertMinutes ?? this.longMeetingAlertMinutes,
+    silenceAlertEnabled: silenceAlertEnabled ?? this.silenceAlertEnabled,
+    silenceAlertMinutes: silenceAlertMinutes ?? this.silenceAlertMinutes,
   );
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
@@ -549,6 +567,13 @@ class AppSettings {
       enrichedMatchThreshold:
           (json['enriched_match_threshold'] as num?)?.toDouble() ?? 0.60,
       matchMargin: (json['match_margin'] as num?)?.toDouble() ?? 0.25,
+      longMeetingAlertEnabled:
+          json['long_meeting_alert_enabled'] as bool? ?? true,
+      longMeetingAlertMinutes:
+          (json['long_meeting_alert_minutes'] as num?)?.round() ?? 60,
+      silenceAlertEnabled: json['silence_alert_enabled'] as bool? ?? true,
+      silenceAlertMinutes:
+          (json['silence_alert_minutes'] as num?)?.round() ?? 5,
     );
   }
 
@@ -591,6 +616,10 @@ class AppSettings {
     'match_threshold': matchThreshold,
     'enriched_match_threshold': enrichedMatchThreshold,
     'match_margin': matchMargin,
+    'long_meeting_alert_enabled': longMeetingAlertEnabled,
+    'long_meeting_alert_minutes': longMeetingAlertMinutes,
+    'silence_alert_enabled': silenceAlertEnabled,
+    'silence_alert_minutes': silenceAlertMinutes,
   };
 }
 

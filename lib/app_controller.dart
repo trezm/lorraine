@@ -2,11 +2,28 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show SystemSound, SystemSoundType;
 import 'package:uuid/uuid.dart';
 
 import 'models.dart';
 import 'repository.dart';
 import 'services.dart';
+
+enum RecordingAlertReason { longMeeting, silence }
+
+/// A pending "are you still meeting?" prompt. The recording stops on its own
+/// when [autoStopAt] passes without the user answering.
+class RecordingAlert {
+  RecordingAlert({
+    required this.reason,
+    required this.autoStopAt,
+    required this.secondsRemaining,
+  });
+
+  final RecordingAlertReason reason;
+  final DateTime autoStopAt;
+  int secondsRemaining;
+}
 
 class AppController extends ChangeNotifier {
   AppController({
@@ -15,17 +32,23 @@ class AppController extends ChangeNotifier {
     UploadPreparationService? uploadPreparation,
     SummaryService? summary,
     ModalDeploymentService? deployment,
+    DateTime Function()? now,
   }) : repository = repository ?? AppRepository(),
        _capture = capture ?? AudioCaptureService(),
        _uploadPreparation = uploadPreparation ?? UploadPreparationService(),
        _summary = summary ?? SummaryService(),
-       _deployment = deployment ?? ModalDeploymentService();
+       _deployment = deployment ?? ModalDeploymentService(),
+       _now = now ?? DateTime.now;
+
+  /// How long a watchdog prompt waits before stopping the recording itself.
+  static const autoStopCountdown = Duration(minutes: 5);
 
   final AppRepository repository;
   final AudioCaptureService _capture;
   final UploadPreparationService _uploadPreparation;
   final SummaryService _summary;
   final ModalDeploymentService _deployment;
+  final DateTime Function() _now;
   final _uuid = const Uuid();
   final Set<String> _polling = {};
 
@@ -38,11 +61,15 @@ class AppController extends ChangeNotifier {
   ModalDeploymentState modalDeploymentState = ModalDeploymentState.idle;
   String? modalDeploymentMessage;
   Duration recordingElapsed = Duration.zero;
+  RecordingAlert? recordingAlert;
   Timer? _timer;
+  bool _ticking = false;
   DateTime? _recordingStartedAt;
   String? _recordingId;
   String? _recordingTitle;
   String? _recordingPath;
+  Duration _longMeetingAlertBaseline = Duration.zero;
+  Duration _silenceAlertSnoozedUntil = Duration.zero;
 
   List<Meeting> get meetings => repository.meetings;
   List<SpeakerProfile> get profiles => repository.profiles;
@@ -140,12 +167,14 @@ class AppController extends ChangeNotifier {
       _recordingTitle = title.trim().isEmpty
           ? 'Untitled meeting'
           : title.trim();
-      _recordingStartedAt = DateTime.now();
+      _recordingStartedAt = _now();
       recordingElapsed = Duration.zero;
+      recordingAlert = null;
+      _longMeetingAlertBaseline = Duration.zero;
+      _silenceAlertSnoozedUntil = Duration.zero;
       isRecording = true;
       _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-        recordingElapsed = DateTime.now().difference(_recordingStartedAt!);
-        notifyListeners();
+        unawaited(_tick());
       });
       notifyListeners();
     } catch (error) {
@@ -154,9 +183,106 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  Future<void> _tick() async {
+    if (_ticking) return;
+    _ticking = true;
+    try {
+      if (!isRecording || isStoppingRecording) return;
+      await checkRecordingWatchdogs();
+      notifyListeners();
+    } finally {
+      _ticking = false;
+    }
+  }
+
+  /// Raises, refreshes, or resolves the "still meeting?" prompt. Runs once per
+  /// recording timer tick; visible so tests can drive it with a fake clock.
+  @visibleForTesting
+  Future<void> checkRecordingWatchdogs() async {
+    if (!isRecording || isStoppingRecording) return;
+    recordingElapsed = _now().difference(_recordingStartedAt!);
+    final settings = this.settings;
+    final alert = recordingAlert;
+    if (alert != null) {
+      if (alert.reason == RecordingAlertReason.silence) {
+        final silence = await _capture.silenceSeconds();
+        if (silence != null && silence < settings.silenceAlertMinutes * 60) {
+          // Someone spoke again — withdraw the prompt without snoozing.
+          recordingAlert = null;
+          return;
+        }
+      }
+      final remaining = alert.autoStopAt.difference(_now());
+      alert.secondsRemaining = remaining.inSeconds.clamp(
+        0,
+        autoStopCountdown.inSeconds,
+      );
+      if (remaining > Duration.zero) return;
+      final title = _recordingTitle;
+      recordingAlert = null;
+      final stoppedId = await stopRecording();
+      if (stoppedId != null) {
+        notice = switch (alert.reason) {
+          RecordingAlertReason.silence =>
+            'Stopped "$title" automatically after '
+                '${settings.silenceAlertMinutes} minutes without speech. '
+                'The recording is saved.',
+          RecordingAlertReason.longMeeting =>
+            'Stopped "$title" automatically — the '
+                '${settings.longMeetingAlertMinutes}-minute check-in went '
+                'unanswered. The recording is saved.',
+        };
+      }
+      return;
+    }
+    if (settings.longMeetingAlertEnabled &&
+        recordingElapsed - _longMeetingAlertBaseline >=
+            Duration(minutes: settings.longMeetingAlertMinutes)) {
+      _raiseRecordingAlert(RecordingAlertReason.longMeeting);
+      return;
+    }
+    if (settings.silenceAlertEnabled &&
+        recordingElapsed >= _silenceAlertSnoozedUntil) {
+      final silence = await _capture.silenceSeconds();
+      if (silence != null && silence >= settings.silenceAlertMinutes * 60) {
+        _raiseRecordingAlert(RecordingAlertReason.silence);
+      }
+    }
+  }
+
+  void _raiseRecordingAlert(RecordingAlertReason reason) {
+    recordingAlert = RecordingAlert(
+      reason: reason,
+      autoStopAt: _now().add(autoStopCountdown),
+      secondsRemaining: autoStopCountdown.inSeconds,
+    );
+    // A chime, because Lorraine is usually behind the meeting app. Sound is
+    // best-effort; the visible countdown is the real prompt.
+    unawaited(
+      SystemSound.play(SystemSoundType.alert).catchError((Object _) {}),
+    );
+  }
+
+  /// The user answered "keep recording": clear the prompt and snooze its
+  /// trigger so it re-arms a full interval from now instead of immediately.
+  void dismissRecordingAlert() {
+    final alert = recordingAlert;
+    if (alert == null) return;
+    recordingAlert = null;
+    switch (alert.reason) {
+      case RecordingAlertReason.longMeeting:
+        _longMeetingAlertBaseline = recordingElapsed;
+      case RecordingAlertReason.silence:
+        _silenceAlertSnoozedUntil =
+            recordingElapsed + Duration(minutes: settings.silenceAlertMinutes);
+    }
+    notifyListeners();
+  }
+
   Future<String?> stopRecording() async {
     if (!isRecording || isStoppingRecording) return null;
     isStoppingRecording = true;
+    recordingAlert = null;
     _timer?.cancel();
     notifyListeners();
     try {

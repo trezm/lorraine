@@ -40,6 +40,12 @@ class MainFlutterWindow: NSWindow {
             result(FlutterError(code: "capture_start", message: error.localizedDescription, details: nil))
           }
         }
+      case "silenceSeconds":
+        if #available(macOS 15.0, *), let capture = self.audioCapture as? MeetingAudioCapture {
+          result(capture.secondsSinceAudio())
+        } else {
+          result(nil)
+        }
       case "stop":
         guard #available(macOS 15.0, *), let capture = self.audioCapture as? MeetingAudioCapture else {
           result(FlutterError(code: "not_recording", message: "No recording is in progress.", details: nil))

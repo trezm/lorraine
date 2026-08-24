@@ -22,6 +22,19 @@ class AudioCaptureService {
 
   Future<String> stop() async =>
       (await _channel.invokeMethod<String>('stop')) ?? '';
+
+  /// Seconds since either audio track last carried sound above the speech
+  /// threshold, or null when unknown (no active recording, or a platform
+  /// without level monitoring).
+  Future<double?> silenceSeconds() async {
+    try {
+      return await _channel.invokeMethod<double>('silenceSeconds');
+    } on PlatformException {
+      return null;
+    } on MissingPluginException {
+      return null;
+    }
+  }
 }
 
 class PreparedAudio {
