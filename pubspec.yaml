@@ -38,7 +38,7 @@ dependencies:
   http: ^1.6.0
   path_provider: ^2.1.6
   uuid: ^4.6.0
-  audioplayers: ^6.7.1
+  audioplayers: ^6.8.1
   flutter_markdown_plus: ^1.0.12
 
 dev_dependencies:
