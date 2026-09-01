@@ -37,7 +37,7 @@ jobs:
         run: flutter pub get
 
       - name: Verify formatting
-        run: dart format --output=none --set-exit-if-changed lib test
+        run: dart format --output=none --set-exit-if-changed lib test bin
 
       - name: Analyze
         run: flutter analyze --fatal-infos --fatal-warnings

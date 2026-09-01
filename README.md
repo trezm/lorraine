@@ -20,6 +20,7 @@ Summaries are optional and run against whichever provider you choose in Settings
 - **recurring speakers recognized across separate meetings** from enrolled local voice profiles, so people you have named once are matched automatically in later sessions
 - enrollment-aware cosine-similarity matching that improves as a profile accumulates confirmed samples
 - Markdown meeting summaries from a provider **you** select: Ollama (local, the default), OpenAI, any OpenAI-compatible endpoint, Anthropic, or OpenRouter
+- a read-only [MCP server](#query-meetings-from-claude-or-any-mcp-client) so Claude and other MCP clients can list, search, and read your transcripts and summaries
 
 The Flutter shell is generated for Windows and Linux as well, but recording is deliberately reported as unsupported there until equivalent WASAPI/PipeWire loopback bridges are added.
 
@@ -124,6 +125,45 @@ Manual identity decisions are deliberately separated from automatic matches:
 
 The enriched rule was added after a short same-speaker recording scored `0.612` against the best profile but only `0.262` against the runner-up. A strict cutoff rejected that clear relative match. A whispered enrollment was an outlier, but removing it would only have changed the best score to about `0.599`, so sample enrichment alone was not enough; the decision also needed to consider the separation from other profiles. The stricter defaults still accept that calibration case while rejecting more borderline matches. All three sensitivity values are available in Settings, and changing them re-evaluates previous automatic matches without altering manually confirmed identities.
 
+## Query meetings from Claude or any MCP client
+
+Lorraine ships a small [Model Context Protocol](https://modelcontextprotocol.io) server, [bin/lorraine_mcp.dart](bin/lorraine_mcp.dart), so an AI assistant can answer questions like "what did we decide in Tuesday's roadmap sync?" from your meeting history. It speaks MCP over stdio and exposes four read-only tools:
+
+- `list_meetings` — meetings newest first, filterable by title substring and date range
+- `search_meetings` — case-insensitive full-text search across titles, summaries, and transcript text
+- `get_transcript` — the raw speaker-labelled transcript, with anonymous labels resolved to names you have enrolled
+- `get_summary` — the stored Markdown synopsis
+
+The server reads `state.json` directly — the app does not need to be running — and re-reads it on every call, so meetings transcribed while the server is up appear immediately. It never writes anything, has no dependencies beyond the Dart SDK, and never parses the settings block, so the Modal and summarization API keys cannot reach a client. Voice embeddings, WAV sample paths, and recording file paths are likewise never exposed.
+
+Build it once, then register the binary with your client:
+
+```sh
+dart build cli -t bin/lorraine_mcp.dart
+```
+
+For Claude Code:
+
+```sh
+claude mcp add lorraine -- "$PWD/build/cli/macos_arm64/bundle/bin/lorraine_mcp"
+```
+
+For Claude Desktop, add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "lorraine": {
+      "command": "/path/to/lorraine/build/cli/macos_arm64/bundle/bin/lorraine_mcp"
+    }
+  }
+}
+```
+
+You can also run it uncompiled with `dart run bin/lorraine_mcp.dart` from the repository root. The state file is discovered automatically (current install first, then the legacy sandbox container); override it with `--state /path/to/state.json` or the `LORRAINE_STATE` environment variable.
+
+One thing to be deliberate about: whatever an MCP client reads becomes part of that client's conversation and travels wherever the client sends its context — for Claude, that is the Anthropic API. Connecting a client to Lorraine is the same kind of choice as picking a hosted summarization provider, so connect only assistants you already trust with your transcripts.
+
 ## Data and privacy
 
 Meeting recordings, transcripts, voice embeddings, samples, settings, and the configured API keys — the Modal key and any summarization-provider keys — are stored under the platform application-support directory. This MVP does not encrypt those files. Voice embeddings may be biometric data, so production deployment should add encrypted-at-rest storage, profile deletion/export, retention controls, consent UX, and organization-specific legal review.
@@ -144,7 +184,7 @@ These are the same checks [CI](.github/workflows/ci.yml) runs on every pull
 request, so a clean run here means a green build:
 
 ```sh
-dart format --output=none --set-exit-if-changed lib test
+dart format --output=none --set-exit-if-changed lib test bin
 flutter analyze --fatal-infos --fatal-warnings
 flutter test --coverage
 
@@ -170,5 +210,6 @@ That command requires a complete Xcode installation and CocoaPods.
 - `lib/app_controller.dart` — recording, job polling, identity, and summary workflow
 - `lib/repository.dart` — local meeting/profile persistence and media locations
 - `lib/services.dart` — Modal CLI startup deployment, API client, capture channel, and the summarization providers
+- `lib/mcp_server.dart` + `bin/lorraine_mcp.dart` — read-only MCP stdio server over the local meeting history
 - `macos/Runner/MeetingAudioCapture.swift` — ScreenCaptureKit capture and AVFoundation mixdown
 - `backend/modal_app.py` — asynchronous FastAPI + Modal + WhisperX service
