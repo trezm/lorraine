@@ -20,6 +20,7 @@ Summaries are optional and run against whichever provider you choose in Settings
 - **recurring speakers recognized across separate meetings** from enrolled local voice profiles, so people you have named once are matched automatically in later sessions
 - enrollment-aware cosine-similarity matching that improves as a profile accumulates confirmed samples
 - Markdown meeting summaries from a provider **you** select: Ollama (local, the default), OpenAI, any OpenAI-compatible endpoint, Anthropic, or OpenRouter
+- forgotten-recording watchdogs: a "Still meeting?" check-in after 60 minutes or 5 minutes of silence, delivered as a macOS notification with **Keep recording** and **Stop and save** buttons, that stops and saves the recording itself if unanswered
 - a read-only [MCP server](#query-meetings-from-claude-or-any-mcp-client) so Claude and other MCP clients can list, search, and read your transcripts and summaries
 
 The Flutter shell is generated for Windows and Linux as well, but recording is deliberately reported as unsupported there until equivalent WASAPI/PipeWire loopback bridges are added.

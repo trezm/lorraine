@@ -37,6 +37,84 @@ class AudioCaptureService {
   }
 }
 
+/// Posts the "still meeting?" check-in to the OS notification center, so it
+/// reaches the user while Lorraine is hidden behind the meeting app.
+///
+/// Every call is best-effort: on platforms without the native bridge, or when
+/// the user has denied notifications, nothing is shown and the in-app prompt
+/// remains the source of truth.
+class SystemNotificationService {
+  static const _channel = MethodChannel('com.lorraine.meeting/notifications');
+
+  /// Identifier shared by every recording check-in, so a new prompt replaces
+  /// the previous banner instead of stacking up.
+  static const recordingAlertId = 'recording-alert';
+
+  /// Invoked with `keep` or `stop` when the user answers the prompt from the
+  /// notification's buttons instead of the app window.
+  void Function(String action)? onRecordingAlertAction;
+
+  bool _listening = false;
+
+  void _listen() {
+    if (_listening || !Platform.isMacOS) return;
+    _listening = true;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'recordingAlertAction') {
+        final action = (call.arguments as Map?)?['action'] as String?;
+        if (action != null) onRecordingAlertAction?.call(action);
+      }
+      return null;
+    });
+  }
+
+  /// Asks for permission if the user has not decided yet. Returns whether
+  /// notifications are allowed.
+  Future<bool> requestPermission() async {
+    _listen();
+    try {
+      return await _channel.invokeMethod<bool>('requestPermission') ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Shows (or replaces) the recording check-in. Returns true when the OS
+  /// accepted it, so the caller knows whether a sound already played.
+  Future<bool> showRecordingAlert({
+    required String title,
+    required String body,
+  }) async {
+    _listen();
+    try {
+      return await _channel.invokeMethod<bool>('show', {
+            'id': recordingAlertId,
+            'title': title,
+            'body': body,
+          }) ??
+          false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
+  /// Removes the check-in from Notification Center once it has been answered,
+  /// withdrawn, or overtaken by the auto-stop.
+  Future<void> clearRecordingAlert() async {
+    try {
+      await _channel.invokeMethod<void>('clear', {'id': recordingAlertId});
+    } on PlatformException {
+      // Nothing to clear.
+    } on MissingPluginException {
+      // No native bridge on this platform.
+    }
+  }
+}
+
 class PreparedAudio {
   const PreparedAudio({required this.file, required this.isTemporary});
 
