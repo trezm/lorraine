@@ -673,10 +673,12 @@ void main() {
   test('long recordings check in, snooze, and auto-stop unanswered', () async {
     final repository = _InMemoryRepository();
     final capture = _FakeAudioCaptureService();
+    final notifications = _FakeSystemNotificationService();
     final clock = _FakeClock();
     final controller = AppController(
       repository: repository,
       capture: capture,
+      notifications: notifications,
       now: () => clock.value,
     )..captureSupported = true;
     await controller.startRecording('Marathon');
@@ -684,15 +686,28 @@ void main() {
     clock.advance(const Duration(minutes: 59));
     await controller.checkRecordingWatchdogs();
     expect(controller.recordingAlert, isNull);
+    expect(notifications.shown, isEmpty);
 
     clock.advance(const Duration(minutes: 1));
     await controller.checkRecordingWatchdogs();
     expect(controller.recordingAlert?.reason, RecordingAlertReason.longMeeting);
     expect(controller.recordingAlert?.secondsRemaining, 300);
 
-    // "Keep recording" snoozes the check-in for another full interval.
+    // The check-in also reaches Notification Center, since Lorraine is
+    // usually behind the meeting app when it fires.
+    expect(notifications.shown, hasLength(1));
+    expect(notifications.shown.single.title, 'Still meeting?');
+    expect(
+      notifications.shown.single.body,
+      '"Marathon" has been recording for over 60 minutes. '
+      'It stops and saves itself in 5 minutes.',
+    );
+
+    // "Keep recording" snoozes the check-in for another full interval and
+    // takes the banner down with it.
     controller.dismissRecordingAlert();
     expect(controller.recordingAlert, isNull);
+    expect(notifications.cleared, 1);
     clock.advance(const Duration(minutes: 59));
     await controller.checkRecordingWatchdogs();
     expect(controller.recordingAlert, isNull);
@@ -700,15 +715,86 @@ void main() {
     await controller.checkRecordingWatchdogs();
     expect(controller.recordingAlert?.reason, RecordingAlertReason.longMeeting);
 
+    expect(notifications.shown, hasLength(2));
+
     // Nobody answers: the countdown lapses and the recording saves itself.
     clock.advance(const Duration(minutes: 5));
     await controller.checkRecordingWatchdogs();
     expect(controller.isRecording, isFalse);
     expect(controller.recordingAlert, isNull);
+    expect(notifications.cleared, 2);
     expect(controller.notice, contains('check-in went unanswered'));
     expect(repository.meetings.single.title, 'Marathon');
     expect(repository.meetings.single.durationSeconds, 125 * 60);
   });
+
+  test('notification buttons answer the check-in without the window', () async {
+    final repository = _InMemoryRepository();
+    final notifications = _FakeSystemNotificationService();
+    final clock = _FakeClock();
+    final controller = AppController(
+      repository: repository,
+      capture: _FakeAudioCaptureService(),
+      notifications: notifications,
+      now: () => clock.value,
+    )..captureSupported = true;
+    await controller.startRecording('Planning');
+
+    // A stale "stop" with no prompt up must not cut the meeting short.
+    notifications.onRecordingAlertAction!('stop');
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isRecording, isTrue);
+
+    clock.advance(const Duration(minutes: 60));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNotNull);
+    notifications.onRecordingAlertAction!('keep');
+    expect(controller.recordingAlert, isNull);
+    expect(controller.isRecording, isTrue);
+    expect(notifications.cleared, 1);
+
+    clock.advance(const Duration(minutes: 60));
+    await controller.checkRecordingWatchdogs();
+    expect(controller.recordingAlert, isNotNull);
+    notifications.onRecordingAlertAction!('stop');
+    await Future<void>.delayed(Duration.zero);
+    expect(controller.isRecording, isFalse);
+    expect(notifications.cleared, 2);
+    expect(repository.meetings.single.title, 'Planning');
+    expect(repository.meetings.single.durationSeconds, 120 * 60);
+  });
+
+  test(
+    'silence check-in names the quiet meeting in its notification',
+    () async {
+      final notifications = _FakeSystemNotificationService();
+      final capture = _FakeAudioCaptureService();
+      final clock = _FakeClock();
+      final controller = AppController(
+        repository: _InMemoryRepository(),
+        capture: capture,
+        notifications: notifications,
+        now: () => clock.value,
+      )..captureSupported = true;
+      await controller.startRecording('Standup');
+
+      clock.advance(const Duration(minutes: 10));
+      capture.silence = 5 * 60;
+      await controller.checkRecordingWatchdogs();
+      expect(controller.recordingAlert?.reason, RecordingAlertReason.silence);
+      expect(
+        notifications.shown.single.body,
+        'No one has spoken in "Standup" for 5 minutes. '
+        'It stops and saves itself in 5 minutes.',
+      );
+
+      // Speech resuming withdraws the banner along with the prompt.
+      capture.silence = 2;
+      await controller.checkRecordingWatchdogs();
+      expect(controller.recordingAlert, isNull);
+      expect(notifications.cleared, 1);
+    },
+  );
 
   test('silence prompts, withdraws on speech, and auto-stops', () async {
     final repository = _InMemoryRepository();
@@ -810,6 +896,29 @@ class _FakeAudioCaptureService extends AudioCaptureService {
 
   @override
   Future<double?> silenceSeconds() async => silence;
+}
+
+class _FakeSystemNotificationService extends SystemNotificationService {
+  /// Whether the OS "accepted" each notification; false simulates a user who
+  /// denied notifications, which should fall back to the in-app chime only.
+  bool delivered = true;
+  final shown = <({String title, String body})>[];
+  int cleared = 0;
+
+  @override
+  Future<bool> requestPermission() async => delivered;
+
+  @override
+  Future<bool> showRecordingAlert({
+    required String title,
+    required String body,
+  }) async {
+    shown.add((title: title, body: body));
+    return delivered;
+  }
+
+  @override
+  Future<void> clearRecordingAlert() async => cleared++;
 }
 
 class _FakeClock {

@@ -3,6 +3,7 @@ import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
   private var audioCapture: Any?
+  private var notifications: MeetingNotifications?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -63,6 +64,16 @@ class MainFlutterWindow: NSWindow {
       default:
         result(FlutterMethodNotImplemented)
       }
+    }
+
+    let notificationChannel = FlutterMethodChannel(
+      name: "com.lorraine.meeting/notifications",
+      binaryMessenger: flutterViewController.engine.binaryMessenger
+    )
+    let notifications = MeetingNotifications(channel: notificationChannel)
+    self.notifications = notifications
+    notificationChannel.setMethodCallHandler { call, result in
+      notifications.handle(call, result: result)
     }
 
     super.awakeFromNib()

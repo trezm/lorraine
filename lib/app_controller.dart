@@ -32,13 +32,17 @@ class AppController extends ChangeNotifier {
     UploadPreparationService? uploadPreparation,
     SummaryService? summary,
     ModalDeploymentService? deployment,
+    SystemNotificationService? notifications,
     DateTime Function()? now,
   }) : repository = repository ?? AppRepository(),
        _capture = capture ?? AudioCaptureService(),
        _uploadPreparation = uploadPreparation ?? UploadPreparationService(),
        _summary = summary ?? SummaryService(),
        _deployment = deployment ?? ModalDeploymentService(),
-       _now = now ?? DateTime.now;
+       _notifications = notifications ?? SystemNotificationService(),
+       _now = now ?? DateTime.now {
+    _notifications.onRecordingAlertAction = _answerRecordingAlertFromOs;
+  }
 
   /// How long a watchdog prompt waits before stopping the recording itself.
   static const autoStopCountdown = Duration(minutes: 5);
@@ -48,6 +52,7 @@ class AppController extends ChangeNotifier {
   final UploadPreparationService _uploadPreparation;
   final SummaryService _summary;
   final ModalDeploymentService _deployment;
+  final SystemNotificationService _notifications;
   final DateTime Function() _now;
   final _uuid = const Uuid();
   final Set<String> _polling = {};
@@ -160,6 +165,9 @@ class AppController extends ChangeNotifier {
     }
     final id = _uuid.v4();
     final path = repository.recordingPath(id);
+    // Ask now, while the user is looking at Lorraine, rather than an hour in
+    // when the first check-in fires behind the meeting app.
+    unawaited(_notifications.requestPermission());
     try {
       await _capture.start(path);
       _recordingId = id;
@@ -209,6 +217,7 @@ class AppController extends ChangeNotifier {
         if (silence != null && silence < settings.silenceAlertMinutes * 60) {
           // Someone spoke again — withdraw the prompt without snoozing.
           recordingAlert = null;
+          unawaited(_notifications.clearRecordingAlert());
           return;
         }
       }
@@ -219,7 +228,7 @@ class AppController extends ChangeNotifier {
       );
       if (remaining > Duration.zero) return;
       final title = _recordingTitle;
-      recordingAlert = null;
+      // stopRecording clears the prompt and its OS notification together.
       final stoppedId = await stopRecording();
       if (stoppedId != null) {
         notice = switch (alert.reason) {
@@ -256,11 +265,51 @@ class AppController extends ChangeNotifier {
       autoStopAt: _now().add(autoStopCountdown),
       secondsRemaining: autoStopCountdown.inSeconds,
     );
-    // A chime, because Lorraine is usually behind the meeting app. Sound is
-    // best-effort; the visible countdown is the real prompt.
-    unawaited(
-      SystemSound.play(SystemSoundType.alert).catchError((Object _) {}),
+    unawaited(_notifyRecordingAlert(reason));
+  }
+
+  /// Lorraine is usually behind the meeting app when a check-in fires, so the
+  /// prompt goes to Notification Center with its own sound. When the OS will
+  /// not show it, fall back to a plain chime so the in-app countdown is at
+  /// least audible. Both are best-effort; the visible countdown is the prompt.
+  Future<void> _notifyRecordingAlert(RecordingAlertReason reason) async {
+    final settings = this.settings;
+    final minutes = switch (reason) {
+      RecordingAlertReason.longMeeting => settings.longMeetingAlertMinutes,
+      RecordingAlertReason.silence => settings.silenceAlertMinutes,
+    };
+    final body = switch (reason) {
+      RecordingAlertReason.longMeeting =>
+        '"$_recordingTitle" has been recording for over $minutes minutes.',
+      RecordingAlertReason.silence =>
+        'No one has spoken in "$_recordingTitle" for '
+            '$minutes ${minutes == 1 ? 'minute' : 'minutes'}.',
+    };
+    final delivered = await _notifications.showRecordingAlert(
+      title: 'Still meeting?',
+      body:
+          '$body It stops and saves itself in '
+          '${autoStopCountdown.inMinutes} minutes.',
     );
+    if (!delivered) {
+      try {
+        await SystemSound.play(SystemSoundType.alert);
+      } catch (_) {
+        // No sound available; the in-app countdown still shows.
+      }
+    }
+  }
+
+  /// The user pressed a button on the OS notification instead of the window.
+  void _answerRecordingAlertFromOs(String action) {
+    switch (action) {
+      case 'keep':
+        dismissRecordingAlert();
+      case 'stop':
+        // Only while the prompt is up: a stale banner should not cut off a
+        // meeting that has since resumed.
+        if (recordingAlert != null) unawaited(stopRecording());
+    }
   }
 
   /// The user answered "keep recording": clear the prompt and snooze its
@@ -269,6 +318,7 @@ class AppController extends ChangeNotifier {
     final alert = recordingAlert;
     if (alert == null) return;
     recordingAlert = null;
+    unawaited(_notifications.clearRecordingAlert());
     switch (alert.reason) {
       case RecordingAlertReason.longMeeting:
         _longMeetingAlertBaseline = recordingElapsed;
@@ -282,7 +332,10 @@ class AppController extends ChangeNotifier {
   Future<String?> stopRecording() async {
     if (!isRecording || isStoppingRecording) return null;
     isStoppingRecording = true;
-    recordingAlert = null;
+    if (recordingAlert != null) {
+      recordingAlert = null;
+      unawaited(_notifications.clearRecordingAlert());
+    }
     _timer?.cancel();
     notifyListeners();
     try {
